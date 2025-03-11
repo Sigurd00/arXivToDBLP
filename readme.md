@@ -1,10 +1,6 @@
 I made this script because my supervisor told me that I should use DBLP to cite my sources instead of arXiv. 
 But at that point I was already 50 citations deep and I could either spend hours making a script to automate this or I could spend hours going back and forth between my citations and DBLP, so here we are.
-
-Currently working on authors field. Some citations have "author" others have "authors" This should be consolidated.
-
-If you find errors in the translation from arxiv to dblp citation, please let me know.
-
+Please let me know if you have any issues with using this script.
 # Usage
 ```bash
 pip install -r requirements.txt

@@ -22,6 +22,7 @@ def extract_arxiv_id(url, journal, volume):
     return None
 
 def format_authors(author_dict):
+    """DBLP response formats author field in a way that is not directly translatable to bibtex. This function resolves that"""
     authors = [entry['text'] for entry in author_dict.get('author', [])]
     
     if not authors:
@@ -29,12 +30,7 @@ def format_authors(author_dict):
     elif len(authors) == 1:
         return authors[0]
     
-    author_list = []
-    
-    for i, author in enumerate(authors, start=1):
-        author_list.append(f"author{i}: {author}")
-    
-    return " and ".join(author_list) if len(authors) > 1 else author_list[0]
+    return " and ".join(authors) if len(authors) > 1 else author_list[0]
 
 def parse_bib_file(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -98,24 +94,26 @@ def find_dblp_citation(arxiv_id, original_citation_key):
     record_type = hit.get('type', 'misc')
     if record_type not in valid_bibtex_types:
         record_type = 'misc'
-
-    authors = hit.get('authors')
-    if not authors:
+    
+    # We exclude the 'authors' field from the JSON response because it requires special formatting; 
+    # it needs to be transformed from 'authors' in JSON to 'author' in BibTeX format.
+    authors = format_authors(hit.get('authors'))
+    if authors == "":
         print(f'Did not find authors for {hit}')
-
+    
     citation = {
         'type': record_type,
         'citation_key': original_citation_key,
-        'authors': format_authors(authors),
         'fields': {key: value for key, value in hit.items() if key not in ['type', 'key', 'authors']}
     }
+    citation['fields']['author'] = authors
 
     return citation
 
 def write_bib_file(file_path, records):
     bib_database = bibtexparser.bibdatabase.BibDatabase()
     bib_database.entries = [
-        {**{'ENTRYTYPE': record['type'], 'ID': record['citation_key']}, 'authors': record.get('authors', record.get('author', 'NO FUCKING AUTHOR??')), **record['fields']}
+        {**{'ENTRYTYPE': record['type'], 'ID': record['citation_key']}, **record['fields']}
         for record in records if record
     ]
     
