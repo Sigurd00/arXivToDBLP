@@ -30,7 +30,7 @@ def format_authors(author_dict):
     elif len(authors) == 1:
         return authors[0]
     
-    return " and ".join(authors) if len(authors) > 1 else author_list[0]
+    return " and ".join(authors) if len(authors) > 1 else authors[0]
 
 def parse_bib_file(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
