@@ -45,7 +45,10 @@ def parse_bib_file(file_path):
         volume_lower = fields.get('volume', '').lower()
         from_arxiv = any('arxiv' in field for field in [url_lower, journal_lower, volume_lower])
         
-        arxiv_id = extract_arxiv_id(url_lower, journal_lower, volume_lower)
+        if from_arxiv:
+            arxiv_id = extract_arxiv_id(url_lower, journal_lower, volume_lower)
+        else:
+            arxiv_id = ""
         
         record_type = entry.get('ENTRYTYPE', 'unknown')
         if record_type not in valid_bibtex_types:
