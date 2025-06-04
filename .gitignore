@@ -1,0 +1,4 @@
+/target
+*.bib
+__pycache__
+*.log
