@@ -1,14 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>BibTeX ArXiv to DBLP Converter</title>
+  <meta charset="UTF-8" />
+  <title>BibTeX Viewer</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.css">
+  <style>
+    .CodeMirror {
+      height: 500px;
+      font-size: 14px;
+    }
+  </style>
 </head>
 <body>
-    <h2>Upload a .bib file</h2>
-    <form method="POST" enctype="multipart/form-data">
-        <input type="file" name="bibfile" accept=".bib" required>
-        <button type="submit">Convert</button>
-    </form>
+  <h2>Upload a .bib file</h2>
+  <input type="file" id="bibfile" accept=".bib" required>
+  <textarea id="editor"></textarea>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.13/mode/stex/stex.min.js"></script>
+  <script>
+    const editor = CodeMirror.fromTextArea(document.getElementById("editor"), {
+      lineNumbers: true,
+      mode: "stex",
+      lineWrapping: true,
+      viewportMargin: Infinity,
+    });
+
+    document.getElementById("bibfile").addEventListener("change", function () {
+      const file = this.files[0];
+      if (file && file.name.endsWith('.bib')) {
+        const reader = new FileReader();
+        reader.onload = function (e) {
+          editor.setValue(e.target.result);
+        };
+        reader.readAsText(file);
+      }
+    });
+  </script>
 </body>
 </html>
