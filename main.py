@@ -1,34 +1,38 @@
+# main.py
 import argparse
-from parser import parse_bib_file, write_bib_file
-from dblp_api import find_dblp_citation
 from logger import logger
+from pipeline import run_flow
 
-def main():
-    parser = argparse.ArgumentParser(description="Replace arXiv BibTeX entries with DBLP data")
-    parser.add_argument("input_file")
-    parser.add_argument("output_file", nargs="?", default="output.bib")
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Replace arXiv BibTeX entries with DBLP data and show per-record diffs."
+    )
+    parser.add_argument("input_file", help="Path to input .bib file")
+    parser.add_argument("output_file", nargs="?", default="output.bib", help="Path to write the output .bib")
+    parser.add_argument("--diff-report", help="Optional Markdown file to write a per-record change report")
+    return parser
+
+def main() -> int:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
-    try:
-        original_records = parse_bib_file(args.input_file)
-    except Exception:
-        logger.critical("Parsing failed. Aborting.")
-        return
+    logger.info("Running ArxivToDblp pipeline")
+    stats = run_flow(args.input_file, args.output_file, args.diff_report)
 
-    new_records = []
-    for record in original_records:
-        if record['from_arxiv'] and record['arxiv_id']:
-            logger.info(f"Looking up: {record['fields'].get('title', 'No title')}")
-            dblp = find_dblp_citation(record['arxiv_id'], record['citation_key'])
-            new_records.append(dblp if dblp else record)
-        else:
-            new_records.append(record)
+    if not stats.get("ok", False):
+        logger.error(f"Completed with errors: {stats.get('error')}")
+        return 1
 
-    try:
-        write_bib_file(args.output_file, new_records)
-    except Exception:
-        logger.critical("Writing output failed.")
+    logger.info(
+        "Done. "
+        f"Total={stats.get('total_records')} | "
+        f"arXiv candidates={stats.get('arxiv_candidates')} | "
+        f"replaced={stats.get('replaced')} | "
+        f"unchanged={stats.get('unchanged')} | "
+        f"no match={stats.get('no_match')} | "
+        f"diffs={stats.get('diff_count')}"
+    )
+    return 0
 
 if __name__ == "__main__":
-    logger.info("Running arXivToDblp as a CLI tool")
-    main()
+    raise SystemExit(main())
