@@ -1,10 +1,10 @@
-import requests
 import time
 from formatter import format_authors
 from parser import VALID_BIBTEX_TYPES
 from logger import logger
 
 def try_fetch_from_dblp(arxiv_id, max_retries=5):
+    import requests
     url = f'https://dblp.org/search/publ/api?q={arxiv_id}&format=json'
     for attempt in range(max_retries):
         try:
@@ -13,7 +13,7 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5):
             if response.status_code == 200:
                 return response.json()
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id}")
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Network error while querying DBLP: {e}")
         time.sleep(2 ** attempt)
     logger.error(f"Failed to fetch from DBLP for {arxiv_id} after {max_retries} retries.")
