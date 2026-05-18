@@ -11,7 +11,7 @@ from flask import (
 )
 from parser import parse_bib_file, write_bib_file, extract_arxiv_id
 from dblp_api import find_dblp_citation
-from diff import compute_diff, format_changes_markdown
+from diff import compute_diff
 from logger import logger
 
 app = Flask(__name__)
