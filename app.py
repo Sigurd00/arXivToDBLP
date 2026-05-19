@@ -4,10 +4,11 @@ import os
 import json
 import tempfile
 import uuid
+import threading
 from typing import Any, Dict, List, Optional
 
 from flask import (
-    Flask, request, render_template, send_file, redirect, url_for, flash
+    Flask, request, render_template, send_file, redirect, url_for, flash, jsonify
 )
 from parser import parse_bib_file, write_bib_file
 from review_logic import build_review_state, finalize_records
@@ -26,6 +27,82 @@ def _state_path(token: str) -> str:
     return os.path.join(STATE_DIR, f"{token}.json")
 
 
+
+
+def _write_state(token: str, state: Dict[str, Any]) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = _state_path(token)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp_path, path)
+
+
+def _read_state(token: str) -> Optional[Dict[str, Any]]:
+    state_path = _state_path(token)
+    if not os.path.exists(state_path):
+        return None
+    with open(state_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _process_review_job(token: str) -> None:
+    state = _read_state(token)
+    if not state:
+        return
+
+    records: List[Dict[str, Any]] = state.get("records") or []
+    proposals: List[Optional[Dict[str, Any]]] = [None] * len(records)
+    changes: List[Optional[Dict[str, Any]]] = [None] * len(records)
+
+    total_candidates = 0
+    completed_candidates = 0
+    for rec in records:
+        if rec.get("from_arxiv") and rec.get("arxiv_id"):
+            total_candidates += 1
+
+    state["status"] = "running"
+    state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
+    _write_state(token, state)
+
+    from diff import compute_diff
+
+    for idx, rec in enumerate(records):
+        if not (rec.get("from_arxiv") and rec.get("arxiv_id")):
+            continue
+
+        arxiv_id = rec.get("arxiv_id")
+        citation_key = rec.get("citation_key")
+        rec["lookup_status"] = "running"
+        _write_state(token, state)
+        try:
+            proposal = find_dblp_citation(arxiv_id, citation_key)
+        except Exception:
+            proposal = None
+            rec["lookup_status"] = "failed"
+        else:
+            rec["lookup_status"] = "found" if proposal else "no_match"
+
+        proposals[idx] = proposal
+        changes[idx] = compute_diff(rec, proposal) if proposal else None
+
+        completed_candidates += 1
+        state["progress"] = {"total_candidates": total_candidates, "completed_candidates": completed_candidates}
+        state["proposals"] = proposals
+        state["changes"] = changes
+        _write_state(token, state)
+
+    review_state = build_review_state(records, lookup_fn=lambda a, b: None)
+    totals = dict(review_state["totals"])
+    totals["with_proposals"] = sum(1 for p in proposals if p)
+    totals["unchanged_or_nomatch"] = totals["total"] - totals["with_proposals"]
+    totals["no_match_records"] = sum(1 for r in records if r.get("lookup_status") in ("no_match", "failed"))
+
+    state["status"] = "done"
+    state["proposals"] = proposals
+    state["changes"] = changes
+    state["totals"] = totals
+    _write_state(token, state)
 @app.route("/", methods=["GET"])
 def home():
     return render_template("index.html")
@@ -33,45 +110,58 @@ def home():
 
 @app.route("/review", methods=["POST"])
 def review():
-    """Accept uploaded .bib, compute DBLP proposals + diffs, render review page."""
+    """Accept uploaded .bib and start async DBLP lookup job."""
     uploaded_file = request.files.get("bibfile")
     if not uploaded_file or not uploaded_file.filename.endswith(".bib"):
         flash("Please upload a valid .bib file (.bib).", "error")
         return redirect(url_for("home"))
 
     try:
-        # Persist upload to a temp file so the parser can read it
         with tempfile.NamedTemporaryFile(delete=False, suffix=".bib") as tmp:
             uploaded_path = tmp.name
             uploaded_file.save(uploaded_path)
 
-        # Parse
         records = parse_bib_file(uploaded_path) or []
         logger.info(f"Parsed {len(records)} records from upload")
 
-        review_state = build_review_state(records, lookup_fn=find_dblp_citation)
-        for key in review_state["totals"].get("failure_keys", []):
-            flash(f"Lookup failed for {key}; original entry kept.", "warning")
-
         token = uuid.uuid4().hex
-        state = review_state
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(_state_path(token), "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        state = {
+            "status": "queued",
+            "records": records,
+            "proposals": [None] * len(records),
+            "changes": [None] * len(records),
+            "progress": {"total_candidates": 0, "completed_candidates": 0},
+            "totals": {"total": len(records), "with_proposals": 0, "unchanged_or_nomatch": len(records)},
+        }
+        _write_state(token, state)
 
-        return render_template(
-            "review.html",
-            token=token,
-            records=review_state["records"],
-            proposals=review_state["proposals"],
-            changes=review_state["changes"],
-            totals=review_state["totals"],
-        )
+        thread = threading.Thread(target=_process_review_job, args=(token,), daemon=True)
+        thread.start()
+
+        return redirect(url_for("review_page", token=token))
 
     except Exception as e:
         logger.error(f"Processing failed: {e}")
         flash(f"Error while processing file: {e}", "error")
         return redirect(url_for("home"))
+
+
+@app.route("/review/<token>", methods=["GET"])
+def review_page(token: str):
+    state = _read_state(token)
+    if not state:
+        flash("Review session expired. Please re-upload.", "error")
+        return redirect(url_for("home"))
+
+    return render_template("review.html", token=token)
+
+
+@app.route("/review_status/<token>", methods=["GET"])
+def review_status(token: str):
+    state = _read_state(token)
+    if not state:
+        return jsonify({"error": "expired"}), 404
+    return jsonify(state)
 
 
 @app.route("/finalize", methods=["POST"])
@@ -106,7 +196,7 @@ def finalize():
         logger.info(f"Wrote output with {finalize_result['applied_replacements']} replacements (of {len(records)} total)")
         # Best-effort cleanup
         try:
-            os.remove(state_path)
+            os.remove(_state_path(token))
         except OSError:
             pass
 

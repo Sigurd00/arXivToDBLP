@@ -2,6 +2,9 @@ I made this script because my supervisor told me that I should use DBLP to cite 
 But at that point I was already 50 citations deep and I could either spend hours making a script to automate this or I could spend hours going back and forth between my citations and DBLP, so here we are.
 Please let me know if you have any issues with using this script.
 
+
+> ⚠️ **Warning (May 19, 2026):** This project is now fully vibe coded. I am intentionally using agentic coding as recklessly as possible to see how far it can take me. Please treat outputs with extra caution, validate results, and review generated changes before relying on them.
+
 # Usage
 ```bash
 pip install -r requirements.txt

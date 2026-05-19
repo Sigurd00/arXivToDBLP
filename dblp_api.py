@@ -1,3 +1,4 @@
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,18 +14,41 @@ from errors import LookupFailure
 _CACHE_MISS = object()
 
 
+def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(0.5, float(retry_after))
+            except ValueError:
+                pass
+    base_wait = min(16.0, 2 ** attempt)
+    return base_wait + random.uniform(0.0, 0.5)
+
+
 def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
     url = f'https://dblp.org/search/publ/api?q={arxiv_id}&format=json'
+    headers = {
+        "User-Agent": "arXivToDBLP/1.0 (+https://dblp.org)",
+        "Accept": "application/json",
+        "Connection": "close",
+    }
+    session = requests.Session()
+
     for attempt in range(max_retries):
+        response: Optional[requests.Response] = None
         try:
             logger.info(f"Querying DBLP for arXiv ID: {arxiv_id}")
-            response = requests.get(url, timeout=request_timeout)
+            response = session.get(url, timeout=request_timeout, headers=headers)
             if response.status_code == 200:
                 return response.json()
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id}")
         except requests.RequestException as e:
             logger.error(f"Network error while querying DBLP: {e}")
-        time.sleep(2 ** attempt)
+
+        if attempt < max_retries - 1:
+            time.sleep(_retry_wait_seconds(response, attempt))
+
     logger.error(f"Failed to fetch from DBLP for {arxiv_id} after {max_retries} retries.")
     raise LookupFailure(f"DBLP lookup failed for arXiv ID {arxiv_id}")
 

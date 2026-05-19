@@ -29,16 +29,8 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn('/', resp.location)
 
-    @patch('app.find_dblp_citation')
-    @patch('app.render_template')
-    def test_review_rendering_with_proposals(self, mock_render, mock_find):
-        mock_render.return_value = 'ok'
-        mock_find.return_value = {
-            'type': 'article',
-            'citation_key': 'k1',
-            'fields': {'title': 'New', 'author': 'A'}
-        }
-
+    @patch('app._process_review_job')
+    def test_review_starts_async_job_and_status_endpoint(self, mock_process):
         bib = b"""
 @article{k1,
  title={Old},
@@ -46,13 +38,15 @@ class AppRouteTests(unittest.TestCase):
 }
 """
         resp = self._post_bib(bib)
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn('/review/', resp.location)
 
-        _, kwargs = mock_render.call_args
-        self.assertEqual(kwargs['totals']['with_proposals'], 1)
-        self.assertEqual(kwargs['totals']['total'], 1)
-        self.assertEqual(len(kwargs['proposals']), 1)
-        self.assertIsNotNone(kwargs['changes'][0])
+        token = resp.location.rsplit('/', 1)[-1]
+        status_resp = self.client.get(f'/review_status/{token}')
+        self.assertEqual(status_resp.status_code, 200)
+        payload = status_resp.get_json()
+        self.assertEqual(payload['status'], 'queued')
+        mock_process.assert_called_once()
 
     def test_finalize_with_accepted_indices(self):
         token = 'tok'
