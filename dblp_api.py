@@ -46,7 +46,10 @@ def _build_dblp_session() -> requests.Session:
 
 
 def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
-    url = f'https://dblp.org/search/publ/api?q={arxiv_id}&format=json'
+    base_urls = [
+        "https://dblp.org/search/publ/api",
+        "https://dblp.uni-trier.de/search/publ/api",
+    ]
     headers = {
         "User-Agent": "arXivToDBLP/1.0 (+https://dblp.org)",
         "Accept": "application/json",
@@ -56,12 +59,18 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
     for attempt in range(max_retries):
         response: Optional[requests.Response] = None
         session = _build_dblp_session()
+        base_url = base_urls[attempt % len(base_urls)]
         try:
-            logger.info(f"Querying DBLP for arXiv ID: {arxiv_id}")
-            response = session.get(url, timeout=request_timeout, headers=headers)
+            logger.info(f"Querying DBLP for arXiv ID: {arxiv_id} via {base_url}")
+            response = session.get(
+                base_url,
+                params={"q": arxiv_id, "format": "json"},
+                timeout=request_timeout,
+                headers=headers,
+            )
             if response.status_code == 200:
                 return response.json()
-            logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id}")
+            logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id} via {base_url}")
         except requests.RequestException as e:
             if attempt < max_retries - 1:
                 logger.warning(f"Transient network error while querying DBLP (attempt {attempt + 1}/{max_retries}) for {arxiv_id}: {e}")
