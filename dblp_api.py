@@ -30,10 +30,10 @@ def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> 
 def _build_dblp_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        status=2,
+        total=0,
+        connect=0,
+        read=0,
+        status=0,
         backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET"]),
@@ -50,11 +50,12 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
     headers = {
         "User-Agent": "arXivToDBLP/1.0 (+https://dblp.org)",
         "Accept": "application/json",
+        "Connection": "close",
     }
-    session = _build_dblp_session()
 
     for attempt in range(max_retries):
         response: Optional[requests.Response] = None
+        session = _build_dblp_session()
         try:
             logger.info(f"Querying DBLP for arXiv ID: {arxiv_id}")
             response = session.get(url, timeout=request_timeout, headers=headers)
@@ -66,6 +67,8 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
                 logger.warning(f"Transient network error while querying DBLP (attempt {attempt + 1}/{max_retries}) for {arxiv_id}: {e}")
             else:
                 logger.error(f"Network error while querying DBLP for {arxiv_id}: {e}")
+        finally:
+            session.close()
 
         if attempt < max_retries - 1:
             time.sleep(_retry_wait_seconds(response, attempt))
