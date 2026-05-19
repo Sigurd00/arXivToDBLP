@@ -15,6 +15,7 @@ from errors import LookupFailure
 _CACHE_MISS = object()
 _REQUEST_GATE_LOCK = threading.Lock()
 _NEXT_REQUEST_NOT_BEFORE = 0.0
+_MIN_SECONDS_BETWEEN_REQUESTS = 2.0
 
 
 def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> float:
@@ -29,7 +30,7 @@ def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> 
     return base_wait + random.uniform(0.0, 0.5)
 
 
-def _reserve_request_slot(min_gap_seconds: float = 1.25) -> None:
+def _reserve_request_slot(min_gap_seconds: float = _MIN_SECONDS_BETWEEN_REQUESTS) -> None:
     """Serialize outbound DBLP calls and enforce a small inter-request gap."""
     global _NEXT_REQUEST_NOT_BEFORE
     with _REQUEST_GATE_LOCK:
@@ -94,6 +95,9 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id} via {base_url}")
             if response.status_code == 429:
                 cooldown = _retry_wait_seconds(response, attempt)
+                logger.warning(
+                    f"DBLP asked us to back off for ~{cooldown:.1f}s (429/Retry-After) for {arxiv_id}"
+                )
                 _apply_global_cooldown(max(cooldown, 10.0))
         except requests.RequestException as e:
             if attempt < max_retries - 1:
@@ -104,7 +108,9 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
             session.close()
 
         if attempt < max_retries - 1:
-            time.sleep(_retry_wait_seconds(response, attempt))
+            wait_seconds = _retry_wait_seconds(response, attempt)
+            logger.info(f"Waiting {wait_seconds:.1f}s before retrying DBLP ID {arxiv_id}")
+            time.sleep(wait_seconds)
 
     logger.error(f"Failed to fetch from DBLP for {arxiv_id} after {max_retries} retries.")
     raise LookupFailure(f"DBLP lookup failed for arXiv ID {arxiv_id}")
