@@ -63,11 +63,31 @@
         const status = record.lookup_status || (record.from_arxiv && record.arxiv_id ? "queued" : "skipped");
 
         let body = `<p><strong>Original title:</strong> ${esc((record.fields || {}).title || "(no title)")}</p>`;
-        if (proposal && change && state.status === "done") {
-          body += `<label><input type="checkbox" name="accept" value="${idx}" checked> Accept DBLP replacement</label>`;
+        if (proposal && change) {
+          const acceptDisabled = state.status === "done" ? "" : " disabled";
+          body += `<label><input type="checkbox" name="accept" value="${idx}" checked${acceptDisabled}> Accept DBLP replacement</label>`;
+          if (state.status !== "done") {
+            body += `<p><em>Selection is enabled after all lookups finish.</em></p>`;
+          }
           if (change.type_changed) body += `<p><strong>Type:</strong> <code>${esc(change.type_changed.from)}</code> → <code>${esc(change.type_changed.to)}</code></p>`;
-        } else if (status === "found") {
-          body += `<p>DBLP proposal found. Details will be available when processing completes.</p>`;
+          const modified = change.modified || {};
+          const added = change.added || {};
+          const removed = change.removed || {};
+          const modifiedItems = Object.entries(modified).map(([k, v]) =>
+            `<li><code>${esc(k)}</code>: <code>${esc(v.from)}</code> → <code>${esc(v.to)}</code></li>`
+          ).join("");
+          const addedItems = Object.entries(added).map(([k, v]) =>
+            `<li><code>${esc(k)}</code>: <code>${esc(v)}</code></li>`
+          ).join("");
+          const removedItems = Object.entries(removed).map(([k, v]) =>
+            `<li><code>${esc(k)}</code>: <code>${esc(v)}</code></li>`
+          ).join("");
+          if (modifiedItems) body += `<p><strong>Modified fields:</strong></p><ul class="diff-list">${modifiedItems}</ul>`;
+          if (addedItems) body += `<p><strong>Added fields:</strong></p><ul class="diff-list">${addedItems}</ul>`;
+          if (removedItems) body += `<p><strong>Removed fields:</strong></p><ul class="diff-list">${removedItems}</ul>`;
+          if (!modifiedItems && !addedItems && !removedItems && !change.type_changed) {
+            body += `<p>No field-level differences were detected.</p>`;
+          }
         } else if (status === "running" || status === "queued") {
           body += `<p>Waiting for DBLP lookup...</p>`;
         } else if (status === "no_match") {
