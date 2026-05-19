@@ -9,9 +9,8 @@ from typing import Any, Dict, List, Optional
 from flask import (
     Flask, request, render_template, send_file, redirect, url_for, flash
 )
-from parser import parse_bib_file, write_bib_file, extract_arxiv_id
-from dblp_api import find_dblp_citation
-from diff import compute_diff, format_changes_markdown
+from parser import parse_bib_file, write_bib_file
+from review_logic import build_review_state, finalize_records
 from logger import logger
 
 app = Flask(__name__)
@@ -49,59 +48,20 @@ def review():
         records = parse_bib_file(uploaded_path) or []
         logger.info(f"Parsed {len(records)} records from upload")
 
-        proposals: List[Optional[Dict[str, Any]]] = []
-        changes: List[Optional[Dict[str, Any]]] = []
-
-        for rec in records:
-            fields = rec.get("fields") or {}
-            arxiv_id = extract_arxiv_id(
-                fields.get("url"),
-                fields.get("doi"),
-                fields.get("eprint"),
-                fields.get("note"),
-            )
-            if not arxiv_id:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            dblp_rec = find_dblp_citation(arxiv_id, rec.get("citation_key"))
-            if not dblp_rec:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            diff = compute_diff(rec, dblp_rec)
-            if not diff:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            proposals.append(dblp_rec)
-            changes.append(diff)
+        review_state = build_review_state(records)
 
         token = uuid.uuid4().hex
-        state = {
-            "records": records,
-            "proposals": proposals,
-            "changes": changes,
-        }
+        state = review_state
         with open(_state_path(token), "w", encoding="utf-8") as f:
             json.dump(state, f)
-
-        totals = {
-            "total": len(records),
-            "with_proposals": sum(1 for p in proposals if p),
-            "unchanged_or_nomatch": sum(1 for p in proposals if not p),
-        }
 
         return render_template(
             "review.html",
             token=token,
-            records=records,
-            proposals=proposals,
-            changes=changes,
-            totals=totals,
+            records=review_state["records"],
+            proposals=review_state["proposals"],
+            changes=review_state["changes"],
+            totals=review_state["totals"],
         )
 
     except Exception as e:
@@ -133,19 +93,13 @@ def finalize():
         accepted_indices = set(int(i) for i in request.form.getlist("accept"))
         logger.info(f"User accepted {len(accepted_indices)} proposed replacements")
 
-        final_records: List[Dict[str, Any]] = []
-        replaced = 0
-        for idx, rec in enumerate(records):
-            if idx in accepted_indices and idx < len(proposals) and proposals[idx]:
-                final_records.append(proposals[idx])
-                replaced += 1
-            else:
-                final_records.append(rec)
+        finalize_result = finalize_records(records, proposals, accepted_indices)
+        final_records = finalize_result["records"]
 
         # Stream output .bib
         out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".bib").name
         write_bib_file(out_path, final_records)
-        logger.info(f"Wrote output with {replaced} replacements (of {len(records)} total)")
+        logger.info(f"Wrote output with {finalize_result['applied_replacements']} replacements (of {len(records)} total)")
         # Best-effort cleanup
         try:
             os.remove(state_path)
