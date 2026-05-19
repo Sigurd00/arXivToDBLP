@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from formatter import format_authors
 from logger import logger
@@ -26,14 +28,31 @@ def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> 
     return base_wait + random.uniform(0.0, 0.5)
 
 
+def _build_dblp_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        status=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
     url = f'https://dblp.org/search/publ/api?q={arxiv_id}&format=json'
     headers = {
         "User-Agent": "arXivToDBLP/1.0 (+https://dblp.org)",
         "Accept": "application/json",
-        "Connection": "close",
     }
-    session = requests.Session()
+    session = _build_dblp_session()
 
     for attempt in range(max_retries):
         response: Optional[requests.Response] = None
@@ -44,7 +63,10 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
                 return response.json()
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id}")
         except requests.RequestException as e:
-            logger.error(f"Network error while querying DBLP: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"Transient network error while querying DBLP (attempt {attempt + 1}/{max_retries}) for {arxiv_id}: {e}")
+            else:
+                logger.error(f"Network error while querying DBLP for {arxiv_id}: {e}")
 
         if attempt < max_retries - 1:
             time.sleep(_retry_wait_seconds(response, attempt))
