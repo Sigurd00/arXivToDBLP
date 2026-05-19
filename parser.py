@@ -12,12 +12,14 @@ def extract_arxiv_id(*fields):
         if not field:
             continue
         match = (
-            re.search(r'arxiv\.org/(abs|pdf)/([^\s/]+)', field) or
-            re.search(r'arxiv:(\d+\.\d+)', field) or
-            re.search(r'abs/(\d+\.\d+)', field)
+            re.search(r'arxiv\.org/(abs|pdf)/([^\s?#]+)', field, re.IGNORECASE) or
+            re.search(r'arxiv:(\d+\.\d+)(?:v\d+)?', field, re.IGNORECASE) or
+            re.search(r'arxiv:([a-z-]+/[0-9]{7})(?:v\d+)?', field, re.IGNORECASE) or
+            re.search(r'abs/(\d+\.\d+)(?:v\d+)?', field)
         )
         if match:
-            return match.group(2) if len(match.groups()) > 1 else match.group(1)
+            arxiv_id = match.group(2) if len(match.groups()) > 1 else match.group(1)
+            return re.sub(r'v\d+$', '', arxiv_id, flags=re.IGNORECASE)
     return None
 
 def parse_bib_file(path):

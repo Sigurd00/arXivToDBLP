@@ -29,7 +29,14 @@ def find_dblp_citation(arxiv_id, original_key):
         logger.warning(f"No DBLP match found for citation key: {original_key}")
         return None
 
-    hit = hits.get('hit', [])[0].get('info', {})
+    raw_hit = hits.get('hit', [])
+    if isinstance(raw_hit, dict):
+        hit = (raw_hit.get('info') or {})
+    elif isinstance(raw_hit, list) and raw_hit:
+        hit = (raw_hit[0].get('info') or {})
+    else:
+        logger.warning(f"Malformed DBLP response for citation key: {original_key}")
+        return None
     record_type = hit.get('type', 'misc')
     if record_type not in VALID_BIBTEX_TYPES:
         record_type = 'misc'
