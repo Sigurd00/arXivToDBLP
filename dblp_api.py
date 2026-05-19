@@ -1,15 +1,23 @@
-import requests
+import threading
 import time
-from formatter import format_authors
-from parser import VALID_BIBTEX_TYPES
-from logger import logger
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
-def try_fetch_from_dblp(arxiv_id, max_retries=5):
+import requests
+
+from formatter import format_authors
+from logger import logger
+from parser import VALID_BIBTEX_TYPES
+
+_CACHE_MISS = object()
+
+
+def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
     url = f'https://dblp.org/search/publ/api?q={arxiv_id}&format=json'
     for attempt in range(max_retries):
         try:
             logger.info(f"Querying DBLP for arXiv ID: {arxiv_id}")
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=request_timeout)
             if response.status_code == 200:
                 return response.json()
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id}")
@@ -19,8 +27,9 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5):
     logger.error(f"Failed to fetch from DBLP for {arxiv_id} after {max_retries} retries.")
     return None
 
-def find_dblp_citation(arxiv_id, original_key):
-    data = try_fetch_from_dblp(arxiv_id)
+
+def find_dblp_citation(arxiv_id, original_key, request_timeout=10):
+    data = try_fetch_from_dblp(arxiv_id, request_timeout=request_timeout)
     if not data:
         return None
 
@@ -45,3 +54,112 @@ def find_dblp_citation(arxiv_id, original_key):
     }
     citation['fields']['author'] = authors
     return citation
+
+
+class DblpLookupService:
+    """Resolve arXiv IDs to DBLP records with dedupe, bounded concurrency and short cache."""
+
+    def __init__(
+        self,
+        max_concurrency: int = 8,
+        per_request_timeout: float = 8.0,
+        total_timeout_budget: float = 20.0,
+        cache_ttl_seconds: float = 120.0,
+    ):
+        self.max_concurrency = max_concurrency
+        self.per_request_timeout = per_request_timeout
+        self.total_timeout_budget = total_timeout_budget
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._cache: Dict[str, Tuple[float, Optional[dict]]] = {}
+        self._cache_lock = threading.Lock()
+
+    def _cache_get(self, arxiv_id: str):
+        now = time.time()
+        with self._cache_lock:
+            cached = self._cache.get(arxiv_id)
+            if cached is None:
+                return _CACHE_MISS
+            ts, value = cached
+            if now - ts > self.cache_ttl_seconds:
+                self._cache.pop(arxiv_id, None)
+                return _CACHE_MISS
+            return value
+
+    def _cache_set(self, arxiv_id: str, value: Optional[dict]) -> None:
+        with self._cache_lock:
+            self._cache[arxiv_id] = (time.time(), value)
+
+    def _fetch_one(self, arxiv_id: str, original_key: str) -> Optional[dict]:
+        return find_dblp_citation(
+            arxiv_id,
+            original_key,
+            request_timeout=self.per_request_timeout,
+        )
+
+    def lookup_many(
+        self,
+        arxiv_ids: List[Optional[str]],
+        original_keys: List[Optional[str]],
+    ) -> List[Optional[dict]]:
+        """Return results aligned to input ordering with deduped remote calls."""
+        results_by_id: Dict[str, Optional[dict]] = {}
+
+        unique_ids: List[str] = []
+        first_keys: Dict[str, str] = {}
+        for arxiv_id, original_key in zip(arxiv_ids, original_keys):
+            if not arxiv_id:
+                continue
+            if arxiv_id not in first_keys:
+                unique_ids.append(arxiv_id)
+                first_keys[arxiv_id] = original_key or arxiv_id
+
+        pending_ids: List[str] = []
+        for arxiv_id in unique_ids:
+            cached = self._cache_get(arxiv_id)
+            if cached is not _CACHE_MISS:
+                results_by_id[arxiv_id] = cached
+            else:
+                pending_ids.append(arxiv_id)
+
+        deadline = time.monotonic() + self.total_timeout_budget
+        with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
+            futures = {
+                arxiv_id: executor.submit(self._fetch_one, arxiv_id, first_keys[arxiv_id])
+                for arxiv_id in pending_ids
+            }
+
+            for arxiv_id in pending_ids:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(f"DBLP lookup budget exhausted; skipping unresolved ID {arxiv_id}")
+                    results_by_id[arxiv_id] = None
+                    self._cache_set(arxiv_id, None)
+                    futures[arxiv_id].cancel()
+                    continue
+
+                try:
+                    result = futures[arxiv_id].result(timeout=remaining)
+                except Exception as e:
+                    logger.warning(f"DBLP lookup failed/timed out for {arxiv_id}: {e}")
+                    result = None
+
+                results_by_id[arxiv_id] = result
+                self._cache_set(arxiv_id, result)
+
+        ordered_results: List[Optional[dict]] = []
+        for arxiv_id, original_key in zip(arxiv_ids, original_keys):
+            if not arxiv_id:
+                ordered_results.append(None)
+                continue
+
+            resolved = results_by_id.get(arxiv_id)
+            if resolved:
+                adjusted = {
+                    **resolved,
+                    "citation_key": original_key or resolved.get("citation_key")
+                }
+                ordered_results.append(adjusted)
+            else:
+                ordered_results.append(None)
+
+        return ordered_results

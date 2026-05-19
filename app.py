@@ -9,9 +9,8 @@ from typing import Any, Dict, List, Optional
 from flask import (
     Flask, request, render_template, send_file, redirect, url_for, flash
 )
-from parser import parse_bib_file, write_bib_file, extract_arxiv_id
-from dblp_api import find_dblp_citation
-from diff import compute_diff, format_changes_markdown
+from parser import parse_bib_file, write_bib_file
+from review_logic import generate_review_proposals
 from logger import logger
 
 app = Flask(__name__)
@@ -49,36 +48,7 @@ def review():
         records = parse_bib_file(uploaded_path) or []
         logger.info(f"Parsed {len(records)} records from upload")
 
-        proposals: List[Optional[Dict[str, Any]]] = []
-        changes: List[Optional[Dict[str, Any]]] = []
-
-        for rec in records:
-            fields = rec.get("fields") or {}
-            arxiv_id = extract_arxiv_id(
-                fields.get("url"),
-                fields.get("doi"),
-                fields.get("eprint"),
-                fields.get("note"),
-            )
-            if not arxiv_id:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            dblp_rec = find_dblp_citation(arxiv_id, rec.get("citation_key"))
-            if not dblp_rec:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            diff = compute_diff(rec, dblp_rec)
-            if not diff:
-                proposals.append(None)
-                changes.append(None)
-                continue
-
-            proposals.append(dblp_rec)
-            changes.append(diff)
+        proposals, changes = generate_review_proposals(records)
 
         token = uuid.uuid4().hex
         state = {
