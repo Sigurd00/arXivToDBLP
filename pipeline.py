@@ -3,7 +3,8 @@ from typing import Optional, Dict, Any, List
 from parser import parse_bib_file, write_bib_file
 from dblp_api import find_dblp_citation
 from logger import logger
-from diff import compute_diff, format_changes_for_log, format_changes_markdown
+from diff import format_changes_for_log, format_changes_markdown
+from transform_service import generate_proposals, apply_replacements
 
 def run_flow(
     input_file: str,
@@ -24,61 +25,44 @@ def run_flow(
         original_records = parse_bib_file(input_file)
     except Exception as e:
         logger.critical(f"Parsing failed for {input_file}: {e}")
-        return {"ok": False, "error": "parse_failed"}
+        return {"ok": False, "error": "parse_failed", "failures": 1}
 
-    new_records: List[dict] = []
     report_sections: List[str] = []
+
+    # 2) Process records via shared transformation service
+    proposal_result = generate_proposals(original_records, find_dblp_citation)
+    proposals = proposal_result["proposals"]
+    diffs = proposal_result["diffs"]
+    shared_stats = proposal_result["stats"]
+
+    for idx, changes in enumerate(diffs):
+        if not changes:
+            continue
+        record = original_records[idx]
+        proposal = proposals[idx]
+        logger.info("\n" + format_changes_for_log(record["citation_key"], changes))
+        if diff_report and proposal:
+            report_sections.append(
+                format_changes_markdown(record["citation_key"], record, proposal, changes)
+            )
+
+    applied = apply_replacements(original_records, proposals)
+    new_records = applied["records"]
 
     stats = {
         "ok": True,
         "input_file": input_file,
         "output_file": output_file,
-        "total_records": len(original_records),
-        "arxiv_candidates": 0,
-        "replaced": 0,
-        "unchanged": 0,
-        "no_match": 0,
-        "diff_count": 0,
+        **shared_stats,
+        "applied_replacements": applied["applied_replacements"],
     }
-
-    # 2) Process records
-    for record in original_records:
-        from_arxiv = record.get("from_arxiv")
-        arxiv_id = record.get("arxiv_id")
-        fields = record.get("fields", {})
-        title = fields.get("title", "No title")
-
-        if from_arxiv and arxiv_id:
-            stats["arxiv_candidates"] += 1
-            logger.info(f"Looking up: {title}")
-
-            dblp = find_dblp_citation(arxiv_id, record["citation_key"])
-            if dblp:
-                changes = compute_diff(record, dblp)
-                if changes:
-                    stats["diff_count"] += 1
-                    logger.info("\n" + format_changes_for_log(record["citation_key"], changes))
-                    if diff_report:
-                        report_sections.append(
-                            format_changes_markdown(record["citation_key"], record, dblp, changes)
-                        )
-                else:
-                    stats["unchanged"] += 1
-                    logger.info(f"No changes for {record['citation_key']}")
-                new_records.append(dblp)
-                stats["replaced"] += 1
-            else:
-                new_records.append(record)
-                stats["no_match"] += 1
-        else:
-            new_records.append(record)
 
     # 3) Write output
     try:
         write_bib_file(output_file, new_records)
     except Exception as e:
         logger.critical(f"Writing output failed for {output_file}: {e}")
-        return {"ok": False, "error": "write_failed", **stats}
+        return {**stats, "ok": False, "error": "write_failed", "failures": stats.get("failures", 0) + 1}
 
     # 4) Optional Markdown report
     if diff_report:

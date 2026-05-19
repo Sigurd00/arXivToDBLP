@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Review DBLP Replacements</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; }
+    .summary { margin-bottom: 1rem; }
+    .entry { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .entry h3 { margin-top: 0; }
+    .diff-list { margin: 0.25rem 0 0.5rem 1rem; }
+    .actions { margin-top: 1.5rem; }
+    .flash { padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; }
+    .flash.warning { background: #fff4df; color: #744b00; border: 1px solid #f2d29b; }
+    code { background: #f6f6f6; padding: 0.1rem 0.25rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h2>Review DBLP replacements</h2>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+
+  <div class="summary">
+    <strong>Total entries:</strong> {{ totals.total }}<br>
+    <strong>Entries with proposals:</strong> {{ totals.with_proposals }}<br>
+    <strong>Unchanged / no match:</strong> {{ totals.unchanged_or_nomatch }}
+  </div>
+
+  <form method="post" action="{{ url_for('finalize') }}">
+    <input type="hidden" name="token" value="{{ token }}" />
+
+    {% for record in records %}
+      {% set proposal = proposals[loop.index0] %}
+      {% set change = changes[loop.index0] %}
+
+      <div class="entry">
+        <h3>{{ record.citation_key }}</h3>
+        <p><strong>Original title:</strong> {{ record.fields.title or '(no title)' }}</p>
+
+        {% if proposal and change %}
+          <label>
+            <input type="checkbox" name="accept" value="{{ loop.index0 }}" checked>
+            Accept DBLP replacement
+          </label>
+
+          {% if change.type_changed %}
+            <p><strong>Type:</strong> <code>{{ change.type_changed.from }}</code> → <code>{{ change.type_changed.to }}</code></p>
+          {% endif %}
+
+          {% if change.added %}
+            <strong>Added fields</strong>
+            <ul class="diff-list">
+              {% for key, value in change.added.items() %}
+                <li><code>{{ key }}</code>: {{ value }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+
+          {% if change.modified %}
+            <strong>Modified fields</strong>
+            <ul class="diff-list">
+              {% for key, pair in change.modified.items() %}
+                <li><code>{{ key }}</code>: {{ pair.from }} → {{ pair.to }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+
+          {% if change.removed %}
+            <strong>Removed fields</strong>
+            <ul class="diff-list">
+              {% for key, value in change.removed.items() %}
+                <li><code>{{ key }}</code>: {{ value }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        {% else %}
+          <p>No DBLP proposal for this entry.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+
+    <div class="actions">
+      <button type="submit">Download converted.bib</button>
+    </div>
+  </form>
+</body>
+</html>
