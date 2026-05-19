@@ -1,7 +1,6 @@
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -121,16 +120,17 @@ def find_dblp_citation(arxiv_id, original_key, request_timeout=10, min_confidenc
 
 
 class DblpLookupService:
-    """Resolve arXiv IDs to DBLP records with dedupe, bounded concurrency and short cache."""
+    """Resolve arXiv IDs to DBLP records with dedupe and short cache."""
 
     def __init__(
         self,
-        max_concurrency: int = 8,
+        max_concurrency: int = 1,
         per_request_timeout: float = 8.0,
         total_timeout_budget: float = 20.0,
         cache_ttl_seconds: float = 120.0,
     ):
-        self.max_concurrency = max_concurrency
+        # Intentionally pinned to sequential DBLP requests to avoid burst traffic.
+        self.max_concurrency = 1
         self.per_request_timeout = per_request_timeout
         self.total_timeout_budget = total_timeout_budget
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -186,29 +186,28 @@ class DblpLookupService:
                 pending_ids.append(arxiv_id)
 
         deadline = time.monotonic() + self.total_timeout_budget
-        with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
-            futures = {
-                arxiv_id: executor.submit(self._fetch_one, arxiv_id, first_keys[arxiv_id])
-                for arxiv_id in pending_ids
-            }
+        for arxiv_id in pending_ids:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(f"DBLP lookup budget exhausted; skipping unresolved ID {arxiv_id}")
+                results_by_id[arxiv_id] = None
+                self._cache_set(arxiv_id, None)
+                continue
 
-            for arxiv_id in pending_ids:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    logger.warning(f"DBLP lookup budget exhausted; skipping unresolved ID {arxiv_id}")
-                    results_by_id[arxiv_id] = None
-                    self._cache_set(arxiv_id, None)
-                    futures[arxiv_id].cancel()
-                    continue
+            started = time.monotonic()
+            try:
+                result = self._fetch_one(arxiv_id, first_keys[arxiv_id])
+            except Exception as e:
+                logger.warning(f"DBLP lookup failed for {arxiv_id}: {e}")
+                result = None
 
-                try:
-                    result = futures[arxiv_id].result(timeout=remaining)
-                except Exception as e:
-                    logger.warning(f"DBLP lookup failed/timed out for {arxiv_id}: {e}")
-                    result = None
+            elapsed = time.monotonic() - started
+            if elapsed > remaining:
+                logger.warning(f"DBLP lookup budget exceeded while resolving {arxiv_id}")
+                result = None
 
-                results_by_id[arxiv_id] = result
-                self._cache_set(arxiv_id, result)
+            results_by_id[arxiv_id] = result
+            self._cache_set(arxiv_id, result)
 
         ordered_results: List[Optional[dict]] = []
         for arxiv_id, original_key in zip(arxiv_ids, original_keys):
