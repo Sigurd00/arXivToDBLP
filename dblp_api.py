@@ -13,6 +13,8 @@ from parser import VALID_BIBTEX_TYPES
 from errors import LookupFailure
 
 _CACHE_MISS = object()
+_REQUEST_GATE_LOCK = threading.Lock()
+_NEXT_REQUEST_NOT_BEFORE = 0.0
 
 
 def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> float:
@@ -25,6 +27,24 @@ def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> 
                 pass
     base_wait = min(16.0, 2 ** attempt)
     return base_wait + random.uniform(0.0, 0.5)
+
+
+def _reserve_request_slot(min_gap_seconds: float = 1.25) -> None:
+    """Serialize outbound DBLP calls and enforce a small inter-request gap."""
+    global _NEXT_REQUEST_NOT_BEFORE
+    with _REQUEST_GATE_LOCK:
+        now = time.monotonic()
+        wait = max(0.0, _NEXT_REQUEST_NOT_BEFORE - now)
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _NEXT_REQUEST_NOT_BEFORE = now + min_gap_seconds
+
+
+def _apply_global_cooldown(seconds: float) -> None:
+    global _NEXT_REQUEST_NOT_BEFORE
+    with _REQUEST_GATE_LOCK:
+        _NEXT_REQUEST_NOT_BEFORE = max(_NEXT_REQUEST_NOT_BEFORE, time.monotonic() + seconds)
 
 
 def _build_dblp_session() -> requests.Session:
@@ -61,6 +81,7 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
         session = _build_dblp_session()
         base_url = base_urls[attempt % len(base_urls)]
         try:
+            _reserve_request_slot()
             logger.info(f"Querying DBLP for arXiv ID: {arxiv_id} via {base_url}")
             response = session.get(
                 base_url,
@@ -71,6 +92,9 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
             if response.status_code == 200:
                 return response.json()
             logger.warning(f"Received {response.status_code} from DBLP for ID {arxiv_id} via {base_url}")
+            if response.status_code == 429:
+                cooldown = _retry_wait_seconds(response, attempt)
+                _apply_global_cooldown(max(cooldown, 10.0))
         except requests.RequestException as e:
             if attempt < max_retries - 1:
                 logger.warning(f"Transient network error while querying DBLP (attempt {attempt + 1}/{max_retries}) for {arxiv_id}: {e}")
