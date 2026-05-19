@@ -24,9 +24,11 @@
 
   <div class="summary" id="summary"></div>
 
+  <div id="entries"></div>
+
   <form method="post" action="{{ url_for('finalize') }}" id="finalize-form" style="display:none;">
     <input type="hidden" name="token" value="{{ token }}" />
-    <div id="entries"></div>
+    <div id="accept-inputs"></div>
     <div class="actions">
       <button type="submit">Download converted.bib</button>
     </div>
@@ -37,6 +39,7 @@
     const summaryEl = document.getElementById("summary");
     const entriesEl = document.getElementById("entries");
     const finalizeForm = document.getElementById("finalize-form");
+    const acceptInputsEl = document.getElementById("accept-inputs");
 
     function esc(v) {
       return String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -57,6 +60,7 @@
       const proposals = state.proposals || [];
       const changes = state.changes || [];
 
+      const acceptValues = [];
       entriesEl.innerHTML = records.map((record, idx) => {
         const proposal = proposals[idx];
         const change = changes[idx];
@@ -64,8 +68,11 @@
 
         let body = `<p><strong>Original title:</strong> ${esc((record.fields || {}).title || "(no title)")}</p>`;
         if (proposal && change) {
-          const acceptDisabled = state.status === "done" ? "" : " disabled";
-          body += `<label><input type="checkbox" name="accept" value="${idx}" checked${acceptDisabled}> Accept DBLP replacement</label>`;
+          if (state.status === "done") {
+            acceptValues.push(idx);
+          }
+          const acceptDisabled = " disabled";
+          body += `<label><input type="checkbox" checked${acceptDisabled}> Accept DBLP replacement</label>`;
           if (state.status !== "done") {
             body += `<p><em>Selection is enabled after all lookups finish.</em></p>`;
           }
@@ -100,6 +107,10 @@
 
         return `<div class="entry"><h3>${esc(record.citation_key)}<span class="status ${esc(status)}">${esc(status)}</span></h3>${body}</div>`;
       }).join("");
+
+      acceptInputsEl.innerHTML = acceptValues
+        .map((idx) => `<input type="hidden" name="accept" value="${idx}">`)
+        .join("");
 
       if (state.status === "done") {
         finalizeForm.style.display = "block";
