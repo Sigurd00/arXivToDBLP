@@ -26,11 +26,12 @@ def main() -> int:
     logger.info(
         "Done. "
         f"Total={stats.get('total_records')} | "
-        f"arXiv candidates={stats.get('arxiv_candidates')} | "
-        f"replaced={stats.get('replaced')} | "
-        f"unchanged={stats.get('unchanged')} | "
-        f"no match={stats.get('no_match')} | "
-        f"diffs={stats.get('diff_count')}"
+        f"candidates={stats.get('candidate_records')} | "
+        f"proposed={stats.get('proposed_replacements')} | "
+        f"applied={stats.get('applied_replacements')} | "
+        f"unchanged={stats.get('unchanged_records')} | "
+        f"no match={stats.get('no_match_records')} | "
+        f"diffs={stats.get('diff_records')}"
     )
     return 0
 
