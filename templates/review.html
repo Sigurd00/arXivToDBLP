@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><title>Review replacements</title></head>
+<body>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <ul>
+      {% for category, message in messages %}
+        <li class="flash {{ category }}">{{ message }}</li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+
+  <h2>Review proposed replacements</h2>
+  <p>Total: {{ totals.total }} | Candidates: {{ totals.candidates }} | Replaced: {{ totals.replaced }} | No match: {{ totals.no_match }} | Failures: {{ totals.failures }}</p>
+
+  <form method="post" action="{{ url_for('finalize') }}">
+    <input type="hidden" name="token" value="{{ token }}" />
+    {% for rec in records %}
+      <div>
+        <strong>{{ rec.citation_key }}</strong>
+        {% if proposals[loop.index0] %}
+          <label><input type="checkbox" name="accept" value="{{ loop.index0 }}" checked /> accept replacement</label>
+        {% else %}
+          <span>(no replacement)</span>
+        {% endif %}
+      </div>
+    {% endfor %}
+    <button type="submit">Download converted.bib</button>
+  </form>
+</body>
+</html>

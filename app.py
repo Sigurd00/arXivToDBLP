@@ -1,4 +1,3 @@
-# app.py
 from __future__ import annotations
 import os
 import json
@@ -11,13 +10,12 @@ from flask import (
 )
 from parser import parse_bib_file, write_bib_file, extract_arxiv_id
 from dblp_api import find_dblp_citation
-from diff import compute_diff, format_changes_markdown
+from diff import compute_diff
 from logger import logger
+from errors import LookupFailure
 
 app = Flask(__name__)
-# Simple secret key for flashing messages; change for production
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret")
-# Where we stash per-upload state between steps
 STATE_DIR = os.path.join(tempfile.gettempdir(), "bibdiff_state")
 os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -33,86 +31,81 @@ def home():
 
 @app.route("/review", methods=["POST"])
 def review():
-    """Accept uploaded .bib, compute DBLP proposals + diffs, render review page."""
     uploaded_file = request.files.get("bibfile")
     if not uploaded_file or not uploaded_file.filename.endswith(".bib"):
         flash("Please upload a valid .bib file (.bib).", "error")
         return redirect(url_for("home"))
 
     try:
-        # Persist upload to a temp file so the parser can read it
         with tempfile.NamedTemporaryFile(delete=False, suffix=".bib") as tmp:
             uploaded_path = tmp.name
             uploaded_file.save(uploaded_path)
 
-        # Parse
         records = parse_bib_file(uploaded_path) or []
-        logger.info(f"Parsed {len(records)} records from upload")
 
         proposals: List[Optional[Dict[str, Any]]] = []
         changes: List[Optional[Dict[str, Any]]] = []
+        failures = 0
+        no_match = 0
 
         for rec in records:
             fields = rec.get("fields") or {}
-            arxiv_id = extract_arxiv_id(
-                fields.get("url"),
-                fields.get("doi"),
-                fields.get("eprint"),
-                fields.get("note"),
-            )
+            arxiv_id = extract_arxiv_id(fields.get("url"), fields.get("doi"), fields.get("eprint"), fields.get("note"))
             if not arxiv_id:
+                proposals.append(None)
+                changes.append(None)
+                no_match += 1
+                continue
+
+            try:
+                dblp_rec = find_dblp_citation(arxiv_id, rec.get("citation_key"))
+            except LookupFailure as e:
+                failures += 1
+                logger.error("lookup_failed", extra={"citation_key": rec.get("citation_key"), "arxiv_id": arxiv_id, "stage": "lookup", "exception_type": type(e).__name__})
+                flash(f"Lookup failed for {rec.get('citation_key')}; original entry kept.", "warning")
                 proposals.append(None)
                 changes.append(None)
                 continue
 
-            dblp_rec = find_dblp_citation(arxiv_id, rec.get("citation_key"))
             if not dblp_rec:
                 proposals.append(None)
                 changes.append(None)
+                no_match += 1
                 continue
 
             diff = compute_diff(rec, dblp_rec)
             if not diff:
                 proposals.append(None)
                 changes.append(None)
+                no_match += 1
                 continue
 
             proposals.append(dblp_rec)
             changes.append(diff)
 
         token = uuid.uuid4().hex
-        state = {
-            "records": records,
-            "proposals": proposals,
-            "changes": changes,
-        }
+        state = {"records": records, "proposals": proposals, "changes": changes}
         with open(_state_path(token), "w", encoding="utf-8") as f:
             json.dump(state, f)
 
         totals = {
             "total": len(records),
-            "with_proposals": sum(1 for p in proposals if p),
-            "unchanged_or_nomatch": sum(1 for p in proposals if not p),
+            "candidates": sum(1 for r in records if r.get("arxiv_id")),
+            "replaced": sum(1 for p in proposals if p),
+            "no_match": no_match,
+            "failures": failures,
         }
 
-        return render_template(
-            "review.html",
-            token=token,
-            records=records,
-            proposals=proposals,
-            changes=changes,
-            totals=totals,
-        )
+        return render_template("review.html", token=token, records=records, proposals=proposals, changes=changes, totals=totals)
 
     except Exception as e:
-        logger.error(f"Processing failed: {e}")
-        flash(f"Error while processing file: {e}", "error")
+        logger.error("review_failed", extra={"stage": "review", "exception_type": type(e).__name__})
+        flash("Could not process the uploaded file. Please verify BibTeX syntax and retry.", "error")
         return redirect(url_for("home"))
 
 
 @app.route("/finalize", methods=["POST"])
 def finalize():
-    """Build the final .bib based on which entries the user accepted."""
     token = request.form.get("token")
     if not token:
         flash("Missing review token.", "error")
@@ -131,8 +124,6 @@ def finalize():
         proposals: List[Optional[Dict[str, Any]]] = state.get("proposals") or []
 
         accepted_indices = set(int(i) for i in request.form.getlist("accept"))
-        logger.info(f"User accepted {len(accepted_indices)} proposed replacements")
-
         final_records: List[Dict[str, Any]] = []
         replaced = 0
         for idx, rec in enumerate(records):
@@ -142,11 +133,9 @@ def finalize():
             else:
                 final_records.append(rec)
 
-        # Stream output .bib
         out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".bib").name
         write_bib_file(out_path, final_records)
-        logger.info(f"Wrote output with {replaced} replacements (of {len(records)} total)")
-        # Best-effort cleanup
+        logger.info("finalize_complete", extra={"stage": "finalize", "replaced": replaced, "total": len(records)})
         try:
             os.remove(state_path)
         except OSError:
@@ -155,8 +144,8 @@ def finalize():
         return send_file(out_path, as_attachment=True, download_name="converted.bib")
 
     except Exception as e:
-        logger.error(f"Finalize failed: {e}")
-        flash(f"Finalize failed: {e}", "error")
+        logger.error("finalize_failed", extra={"stage": "finalize", "exception_type": type(e).__name__})
+        flash("Could not generate output file. Please retry.", "error")
         return redirect(url_for("home"))
 
 

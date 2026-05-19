@@ -25,10 +25,10 @@ def main() -> int:
 
     logger.info(
         "Done. "
-        f"Total={stats.get('total_records')} | "
-        f"arXiv candidates={stats.get('arxiv_candidates')} | "
+        f"Total={stats.get('total')} | "
+        f"arXiv candidates={stats.get('candidates')} | "
         f"replaced={stats.get('replaced')} | "
-        f"unchanged={stats.get('unchanged')} | "
+        f"unchanged={stats.get('no_match')} | "
         f"no match={stats.get('no_match')} | "
         f"diffs={stats.get('diff_count')}"
     )
