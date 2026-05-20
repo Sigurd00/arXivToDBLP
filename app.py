@@ -13,7 +13,7 @@ from flask import (
 )
 from parser import parse_bib_file, write_bib_file
 from review_logic import build_review_state, finalize_records
-from dblp_api import find_dblp_citation
+from dblp_api import find_dblp_citation, ensure_local_dblp_dataset_fresh
 from logger import logger
 
 app = Flask(__name__)
@@ -87,6 +87,10 @@ def _process_review_job(token: str) -> None:
         state["status"] = "running"
         state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
         _write_state(token, state)
+        try:
+            ensure_local_dblp_dataset_fresh()
+        except Exception as e:
+            logger.warning(f"Could not refresh local DBLP dataset, falling back to API: {e}")
 
         from diff import compute_diff
 

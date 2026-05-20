@@ -1,6 +1,10 @@
 import random
 import threading
 import time
+import os
+import gzip
+import xml.etree.ElementTree as ET
+from urllib.request import urlretrieve
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -16,6 +20,11 @@ _CACHE_MISS = object()
 _REQUEST_GATE_LOCK = threading.Lock()
 _NEXT_REQUEST_NOT_BEFORE = 0.0
 _MIN_SECONDS_BETWEEN_REQUESTS = 2.0
+_DATASET_LOCK = threading.Lock()
+_LOCAL_DBLP_XML_GZ = os.environ.get("DBLP_XML_GZ_PATH", os.path.join(os.getcwd(), ".cache", "dblp.xml.gz"))
+_LOCAL_DBLP_INDEX = os.environ.get("DBLP_INDEX_PATH", os.path.join(os.getcwd(), ".cache", "dblp_arxiv_index.json"))
+_DBLP_XML_URL = "https://dblp.org/xml/dblp.xml.gz"
+_LOCAL_INDEX_CACHE: Dict[str, dict] = {}
 
 
 def _retry_wait_seconds(response: Optional[requests.Response], attempt: int) -> float:
@@ -46,6 +55,75 @@ def _apply_global_cooldown(seconds: float) -> None:
     global _NEXT_REQUEST_NOT_BEFORE
     with _REQUEST_GATE_LOCK:
         _NEXT_REQUEST_NOT_BEFORE = max(_NEXT_REQUEST_NOT_BEFORE, time.monotonic() + seconds)
+
+
+def ensure_local_dblp_dataset_fresh(max_age_hours: float = 24.0) -> None:
+    """Download DBLP XML dump and rebuild local arXiv index if stale/missing."""
+    with _DATASET_LOCK:
+        os.makedirs(os.path.dirname(_LOCAL_DBLP_XML_GZ), exist_ok=True)
+        os.makedirs(os.path.dirname(_LOCAL_DBLP_INDEX), exist_ok=True)
+        now = time.time()
+        stale_after = max_age_hours * 3600.0
+
+        xml_missing = not os.path.exists(_LOCAL_DBLP_XML_GZ)
+        xml_stale = (not xml_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_XML_GZ)) > stale_after)
+        if xml_missing or xml_stale:
+            logger.info("Refreshing local DBLP XML dataset")
+            urlretrieve(_DBLP_XML_URL, _LOCAL_DBLP_XML_GZ)
+
+        idx_missing = not os.path.exists(_LOCAL_DBLP_INDEX)
+        idx_stale = (not idx_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_INDEX)) > stale_after)
+        if idx_missing or idx_stale or xml_missing or xml_stale:
+            _rebuild_local_arxiv_index()
+
+
+def _rebuild_local_arxiv_index() -> None:
+    logger.info("Rebuilding local DBLP arXiv index")
+    arxiv_index: Dict[str, dict] = {}
+    valid_types = {"article", "inproceedings", "proceedings", "book", "incollection", "phdthesis", "mastersthesis", "www"}
+    with gzip.open(_LOCAL_DBLP_XML_GZ, "rb") as f:
+        context = ET.iterparse(f, events=("end",))
+        for _, elem in context:
+            if elem.tag not in valid_types:
+                continue
+            ee_vals = [e.text or "" for e in elem.findall("ee")]
+            arxiv_id = None
+            for ee in ee_vals:
+                if "arxiv.org/abs/" in ee:
+                    arxiv_id = ee.split("/abs/")[-1].split("v")[0]
+                    break
+            if not arxiv_id:
+                elem.clear()
+                continue
+            title = (elem.findtext("title") or "").strip()
+            year = (elem.findtext("year") or "").strip()
+            venue = (elem.findtext("journal") or elem.findtext("booktitle") or "").strip()
+            authors = [a.text.strip() for a in elem.findall("author") if a.text]
+            arxiv_index[arxiv_id] = {
+                "type": elem.tag if elem.tag in VALID_BIBTEX_TYPES else "misc",
+                "title": title,
+                "year": year,
+                "venue": venue,
+                "author": " and ".join(authors),
+                "ee": ee_vals[0] if ee_vals else "",
+            }
+            elem.clear()
+    with open(_LOCAL_DBLP_INDEX, "w", encoding="utf-8") as out:
+        import json
+        json.dump(arxiv_index, out)
+    _LOCAL_INDEX_CACHE.clear()
+
+
+def _load_local_index() -> Dict[str, dict]:
+    if _LOCAL_INDEX_CACHE:
+        return _LOCAL_INDEX_CACHE
+    if not os.path.exists(_LOCAL_DBLP_INDEX):
+        return {}
+    import json
+    with open(_LOCAL_DBLP_INDEX, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    _LOCAL_INDEX_CACHE.update(data)
+    return _LOCAL_INDEX_CACHE
 
 
 def _build_dblp_session() -> requests.Session:
@@ -117,6 +195,21 @@ def try_fetch_from_dblp(arxiv_id, max_retries=5, request_timeout=10):
 
 
 def find_dblp_citation(arxiv_id, original_key, request_timeout=10, min_confidence=0.0):
+    local_idx = _load_local_index()
+    local_hit = local_idx.get(arxiv_id)
+    if local_hit:
+        return {
+            "type": local_hit.get("type", "misc"),
+            "citation_key": original_key,
+            "fields": {
+                "title": local_hit.get("title", ""),
+                "year": local_hit.get("year", ""),
+                "venue": local_hit.get("venue", ""),
+                "ee": local_hit.get("ee", ""),
+                "author": local_hit.get("author", ""),
+            },
+        }
+
     data = try_fetch_from_dblp(arxiv_id, request_timeout=request_timeout)
     if not data:
         return None
