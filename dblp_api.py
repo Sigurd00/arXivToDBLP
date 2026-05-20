@@ -4,7 +4,6 @@ import time
 import os
 import gzip
 import xml.etree.ElementTree as ET
-from urllib.request import urlretrieve
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -69,7 +68,7 @@ def ensure_local_dblp_dataset_fresh(max_age_hours: float = 24.0) -> None:
         xml_stale = (not xml_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_XML_GZ)) > stale_after)
         if xml_missing or xml_stale:
             logger.info("Refreshing local DBLP XML dataset")
-            urlretrieve(_DBLP_XML_URL, _LOCAL_DBLP_XML_GZ)
+            _download_dblp_xml(_DBLP_XML_URL, _LOCAL_DBLP_XML_GZ)
 
         idx_missing = not os.path.exists(_LOCAL_DBLP_INDEX)
         idx_stale = (not idx_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_INDEX)) > stale_after)
@@ -112,6 +111,18 @@ def _rebuild_local_arxiv_index() -> None:
         import json
         json.dump(arxiv_index, out)
     _LOCAL_INDEX_CACHE.clear()
+
+
+def _download_dblp_xml(url: str, out_path: str, timeout: float = 120.0) -> None:
+    """Download DBLP XML dump using requests (more robust TLS handling than urllib on some systems)."""
+    tmp_path = f"{out_path}.tmp"
+    with requests.get(url, stream=True, timeout=timeout) as resp:
+        resp.raise_for_status()
+        with open(tmp_path, "wb") as out:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    out.write(chunk)
+    os.replace(tmp_path, out_path)
 
 
 def _load_local_index() -> Dict[str, dict]:

@@ -87,10 +87,7 @@ def _process_review_job(token: str) -> None:
         state["status"] = "running"
         state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
         _write_state(token, state)
-        try:
-            ensure_local_dblp_dataset_fresh()
-        except Exception as e:
-            logger.warning(f"Could not refresh local DBLP dataset, falling back to API: {e}")
+        ensure_local_dblp_dataset_fresh()
 
         from diff import compute_diff
 
@@ -132,6 +129,13 @@ def _process_review_job(token: str) -> None:
         _write_state(token, state)
     except Exception as e:
         logger.exception(f"Review job failed for token {token}: {e}")
+        try:
+            failed_state = _read_state(token) or {}
+            failed_state["status"] = "failed"
+            failed_state["error"] = str(e)
+            _write_state(token, failed_state)
+        except Exception:
+            logger.exception(f"Could not persist failed state for token {token}")
 @app.route("/", methods=["GET"])
 def home():
     return render_template("index.html")
