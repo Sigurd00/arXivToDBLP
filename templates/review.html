@@ -55,12 +55,18 @@
     function render(state) {
       const p = state.progress || { total_candidates: 0, completed_candidates: 0 };
       const totals = state.totals || { total: (state.records || []).length, with_proposals: 0, unchanged_or_nomatch: (state.records || []).length };
+      const syncNote = state.dataset_sync_in_progress
+        ? `<br><strong>Dataset sync:</strong> Updating local DBLP dataset in background. Lookups may wait briefly.`
+        : "";
+      const statusDetail = state.status_detail
+        ? `<br><strong>Step:</strong> ${esc(state.status_detail)}`
+        : "";
       summaryEl.innerHTML = `
         <strong>Status:</strong> ${esc(state.status)}<br>
         <strong>Progress:</strong> ${p.completed_candidates}/${p.total_candidates} arXiv lookups completed<br>
         <strong>Total entries:</strong> ${totals.total}<br>
         <strong>Entries with proposals:</strong> ${totals.with_proposals}<br>
-        <strong>Unchanged / no match:</strong> ${totals.unchanged_or_nomatch}
+        <strong>Unchanged / no match:</strong> ${totals.unchanged_or_nomatch}${statusDetail}${syncNote}
       `;
 
       const records = state.records || [];

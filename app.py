@@ -13,7 +13,7 @@ from flask import (
 )
 from parser import parse_bib_file, write_bib_file
 from review_logic import build_review_state, finalize_records
-from dblp_api import find_dblp_citation, ensure_local_dblp_dataset_fresh
+from dblp_api import find_dblp_citation, ensure_local_dblp_dataset_fresh, is_dataset_sync_in_progress
 from logger import logger
 
 app = Flask(__name__)
@@ -98,9 +98,12 @@ def _process_review_job(token: str) -> None:
                 total_candidates += 1
 
         state["status"] = "running"
+        state["status_detail"] = "Syncing local DBLP dataset before lookups..."
         state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
         _write_state(token, state)
         ensure_local_dblp_dataset_fresh()
+        state["status_detail"] = "Running citation lookups..."
+        _write_state(token, state)
 
         from diff import compute_diff
 
@@ -207,7 +210,9 @@ def review_status(token: str):
     state = _read_state(token)
     if not state:
         return jsonify({"error": "expired"}), 404
-    return jsonify(state)
+    payload = dict(state)
+    payload["dataset_sync_in_progress"] = is_dataset_sync_in_progress()
+    return jsonify(payload)
 
 
 @app.route("/finalize", methods=["POST"])

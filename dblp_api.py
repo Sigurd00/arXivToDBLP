@@ -20,6 +20,7 @@ _REQUEST_GATE_LOCK = threading.Lock()
 _NEXT_REQUEST_NOT_BEFORE = 0.0
 _MIN_SECONDS_BETWEEN_REQUESTS = 2.0
 _DATASET_LOCK = threading.Lock()
+_DATASET_SYNC_IN_PROGRESS = False
 _LOCAL_DBLP_XML_GZ = os.environ.get("DBLP_XML_GZ_PATH", os.path.join(os.getcwd(), ".cache", "dblp.xml.gz"))
 _LOCAL_DBLP_INDEX = os.environ.get("DBLP_INDEX_PATH", os.path.join(os.getcwd(), ".cache", "dblp_arxiv_index.json"))
 _DBLP_XML_URL = "https://dblp.org/xml/dblp.xml.gz"
@@ -58,22 +59,31 @@ def _apply_global_cooldown(seconds: float) -> None:
 
 def ensure_local_dblp_dataset_fresh(max_age_hours: float = 24.0) -> None:
     """Download DBLP XML dump and rebuild local arXiv index if stale/missing."""
+    global _DATASET_SYNC_IN_PROGRESS
     with _DATASET_LOCK:
-        os.makedirs(os.path.dirname(_LOCAL_DBLP_XML_GZ), exist_ok=True)
-        os.makedirs(os.path.dirname(_LOCAL_DBLP_INDEX), exist_ok=True)
-        now = time.time()
-        stale_after = max_age_hours * 3600.0
+        _DATASET_SYNC_IN_PROGRESS = True
+        try:
+            os.makedirs(os.path.dirname(_LOCAL_DBLP_XML_GZ), exist_ok=True)
+            os.makedirs(os.path.dirname(_LOCAL_DBLP_INDEX), exist_ok=True)
+            now = time.time()
+            stale_after = max_age_hours * 3600.0
 
-        xml_missing = not os.path.exists(_LOCAL_DBLP_XML_GZ)
-        xml_stale = (not xml_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_XML_GZ)) > stale_after)
-        if xml_missing or xml_stale:
-            logger.info("Refreshing local DBLP XML dataset")
-            _download_dblp_xml(_DBLP_XML_URL, _LOCAL_DBLP_XML_GZ)
+            xml_missing = not os.path.exists(_LOCAL_DBLP_XML_GZ)
+            xml_stale = (not xml_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_XML_GZ)) > stale_after)
+            if xml_missing or xml_stale:
+                logger.info("Refreshing local DBLP XML dataset")
+                _download_dblp_xml(_DBLP_XML_URL, _LOCAL_DBLP_XML_GZ)
 
-        idx_missing = not os.path.exists(_LOCAL_DBLP_INDEX)
-        idx_stale = (not idx_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_INDEX)) > stale_after)
-        if idx_missing or idx_stale or xml_missing or xml_stale:
-            _rebuild_local_arxiv_index()
+            idx_missing = not os.path.exists(_LOCAL_DBLP_INDEX)
+            idx_stale = (not idx_missing) and ((now - os.path.getmtime(_LOCAL_DBLP_INDEX)) > stale_after)
+            if idx_missing or idx_stale or xml_missing or xml_stale:
+                _rebuild_local_arxiv_index()
+        finally:
+            _DATASET_SYNC_IN_PROGRESS = False
+
+
+def is_dataset_sync_in_progress() -> bool:
+    return _DATASET_SYNC_IN_PROGRESS
 
 
 def _rebuild_local_arxiv_index() -> None:
