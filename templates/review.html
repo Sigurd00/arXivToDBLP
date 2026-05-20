@@ -8,13 +8,20 @@
     body { font-family: Arial, sans-serif; margin: 2rem; }
     .summary { margin-bottom: 1rem; }
     .entry { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .entry.compact { padding: 0.45rem 0.65rem; margin-bottom: 0.5rem; font-size: 0.92rem; opacity: 0.9; }
     .entry h3 { margin-top: 0; }
+    .entry.compact h3 { margin: 0; font-size: 0.96rem; }
+    .entry.compact p { margin: 0.25rem 0 0 0; }
     .status { font-size: 0.9rem; border-radius: 999px; padding: 0.2rem 0.5rem; margin-left: 0.5rem; }
     .status.queued { background: #f0f0f0; }
     .status.running { background: #e8f1ff; }
     .status.found { background: #e8f9ee; }
     .status.no_match, .status.failed { background: #fff2e5; }
     .diff-list { margin: 0.25rem 0 0.5rem 1rem; }
+    .git-diff { background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 0.6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.82rem; line-height: 1.35; white-space: pre-wrap; margin-top: 0.5rem; }
+    .git-diff .plus { color: #86efac; }
+    .git-diff .minus { color: #fca5a5; }
+    .git-diff .meta { color: #93c5fd; }
     .actions { margin-top: 1.5rem; }
     code { background: #f6f6f6; padding: 0.1rem 0.25rem; border-radius: 3px; }
   </style>
@@ -65,6 +72,7 @@
         const proposal = proposals[idx];
         const change = changes[idx];
         const status = record.lookup_status || (record.from_arxiv && record.arxiv_id ? "queued" : "skipped");
+        const isCompact = status === "queued";
 
         let body = `<p><strong>Original title:</strong> ${esc((record.fields || {}).title || "(no title)")}</p>`;
         if (proposal && change) {
@@ -80,23 +88,31 @@
           const modified = change.modified || {};
           const added = change.added || {};
           const removed = change.removed || {};
-          const modifiedItems = Object.entries(modified).map(([k, v]) =>
-            `<li><code>${esc(k)}</code>: <code>${esc(v.from)}</code> → <code>${esc(v.to)}</code></li>`
-          ).join("");
-          const addedItems = Object.entries(added).map(([k, v]) =>
-            `<li><code>${esc(k)}</code>: <code>${esc(v)}</code></li>`
-          ).join("");
-          const removedItems = Object.entries(removed).map(([k, v]) =>
-            `<li><code>${esc(k)}</code>: <code>${esc(v)}</code></li>`
-          ).join("");
-          if (modifiedItems) body += `<p><strong>Modified fields:</strong></p><ul class="diff-list">${modifiedItems}</ul>`;
-          if (addedItems) body += `<p><strong>Added fields:</strong></p><ul class="diff-list">${addedItems}</ul>`;
-          if (removedItems) body += `<p><strong>Removed fields:</strong></p><ul class="diff-list">${removedItems}</ul>`;
-          if (!modifiedItems && !addedItems && !removedItems && !change.type_changed) {
+          const diffLines = ['<span class="meta">@@ citation diff @@</span>'];
+          if (change.type_changed) {
+            diffLines.push(`<span class="minus">-type: ${esc(change.type_changed.from)}</span>`);
+            diffLines.push(`<span class="plus">+type: ${esc(change.type_changed.to)}</span>`);
+          }
+          Object.entries(modified).forEach(([k, v]) => {
+            diffLines.push(`<span class="minus">-${esc(k)}: ${esc(v.from)}</span>`);
+            diffLines.push(`<span class="plus">+${esc(k)}: ${esc(v.to)}</span>`);
+          });
+          Object.entries(added).forEach(([k, v]) => {
+            diffLines.push(`<span class="plus">+${esc(k)}: ${esc(v)}</span>`);
+          });
+          Object.entries(removed).forEach(([k, v]) => {
+            diffLines.push(`<span class="minus">-${esc(k)}: ${esc(v)}</span>`);
+          });
+          if (diffLines.length > 1) {
+            body += `<div class="git-diff">${diffLines.join("\n")}</div>`;
+          }
+          if (diffLines.length === 1 && !change.type_changed) {
             body += `<p>No field-level differences were detected.</p>`;
           }
         } else if (status === "running" || status === "queued") {
-          body += `<p>Waiting for DBLP lookup...</p>`;
+          body += status === "queued"
+            ? `<p>Queued… waiting its turn.</p>`
+            : `<p>Looking up DBLP data…</p>`;
         } else if (status === "no_match") {
           body += `<p>No DBLP proposal for this entry.</p>`;
         } else if (status === "failed") {
@@ -105,7 +121,7 @@
           body += `<p>Not an arXiv entry; unchanged.</p>`;
         }
 
-        return `<div class="entry"><h3>${esc(record.citation_key)}<span class="status ${esc(status)}">${esc(status)}</span></h3>${body}</div>`;
+        return `<div class="entry${isCompact ? " compact" : ""}"><h3>${esc(record.citation_key)}<span class="status ${esc(status)}">${esc(status)}</span></h3>${body}</div>`;
       }).join("");
 
       acceptInputsEl.innerHTML = acceptValues
