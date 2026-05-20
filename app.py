@@ -32,6 +32,12 @@ def _sync_local_dataset_on_startup() -> None:
     logger.info("Local DBLP dataset sync complete")
 
 
+def _start_background_dataset_sync() -> None:
+    """Start dataset sync in background so web server can start immediately."""
+    t = threading.Thread(target=_sync_local_dataset_on_startup, daemon=True)
+    t.start()
+
+
 def _state_path(token: str) -> str:
     return os.path.join(STATE_DIR, f"{token}.json")
 
@@ -249,6 +255,6 @@ def finalize():
 
 
 if __name__ == "__main__":
-    _sync_local_dataset_on_startup()
+    _start_background_dataset_sync()
     logger.info("Running BibTeX DBLP web UI")
     app.run(debug=True)
