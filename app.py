@@ -5,6 +5,7 @@ import json
 import tempfile
 import uuid
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from flask import (
@@ -21,6 +22,7 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret")
 # Where we stash per-upload state between steps
 STATE_DIR = os.path.join(tempfile.gettempdir(), "bibdiff_state")
 os.makedirs(STATE_DIR, exist_ok=True)
+_STATE_IO_LOCK = threading.Lock()
 
 
 def _state_path(token: str) -> str:
@@ -33,76 +35,99 @@ def _write_state(token: str, state: Dict[str, Any]) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
     path = _state_path(token)
     tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    os.replace(tmp_path, path)
+    with _STATE_IO_LOCK:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+        # On Windows, replacing a file can fail transiently if another
+        # reader has the destination file open. Retry briefly.
+        last_err: Optional[Exception] = None
+        for _ in range(6):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                time.sleep(0.05)
+
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        if last_err:
+            raise last_err
 
 
 def _read_state(token: str) -> Optional[Dict[str, Any]]:
     state_path = _state_path(token)
     if not os.path.exists(state_path):
         return None
-    with open(state_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with _STATE_IO_LOCK:
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
 
 def _process_review_job(token: str) -> None:
-    state = _read_state(token)
-    if not state:
-        return
+    try:
+        state = _read_state(token)
+        if not state:
+            return
 
-    records: List[Dict[str, Any]] = state.get("records") or []
-    proposals: List[Optional[Dict[str, Any]]] = [None] * len(records)
-    changes: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        records: List[Dict[str, Any]] = state.get("records") or []
+        proposals: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        changes: List[Optional[Dict[str, Any]]] = [None] * len(records)
 
-    total_candidates = 0
-    completed_candidates = 0
-    for rec in records:
-        if rec.get("from_arxiv") and rec.get("arxiv_id"):
-            total_candidates += 1
+        total_candidates = 0
+        completed_candidates = 0
+        for rec in records:
+            if rec.get("from_arxiv") and rec.get("arxiv_id"):
+                total_candidates += 1
 
-    state["status"] = "running"
-    state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
-    _write_state(token, state)
-
-    from diff import compute_diff
-
-    for idx, rec in enumerate(records):
-        if not (rec.get("from_arxiv") and rec.get("arxiv_id")):
-            continue
-
-        arxiv_id = rec.get("arxiv_id")
-        citation_key = rec.get("citation_key")
-        rec["lookup_status"] = "running"
+        state["status"] = "running"
+        state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
         _write_state(token, state)
-        try:
-            proposal = find_dblp_citation(arxiv_id, citation_key)
-        except Exception:
-            proposal = None
-            rec["lookup_status"] = "failed"
-        else:
-            rec["lookup_status"] = "found" if proposal else "no_match"
 
-        proposals[idx] = proposal
-        changes[idx] = compute_diff(rec, proposal) if proposal else None
+        from diff import compute_diff
 
-        completed_candidates += 1
-        state["progress"] = {"total_candidates": total_candidates, "completed_candidates": completed_candidates}
+        for idx, rec in enumerate(records):
+            if not (rec.get("from_arxiv") and rec.get("arxiv_id")):
+                continue
+
+            arxiv_id = rec.get("arxiv_id")
+            citation_key = rec.get("citation_key")
+            rec["lookup_status"] = "running"
+            _write_state(token, state)
+            try:
+                proposal = find_dblp_citation(arxiv_id, citation_key)
+            except Exception:
+                proposal = None
+                rec["lookup_status"] = "failed"
+            else:
+                rec["lookup_status"] = "found" if proposal else "no_match"
+
+            proposals[idx] = proposal
+            changes[idx] = compute_diff(rec, proposal) if proposal else None
+
+            completed_candidates += 1
+            state["progress"] = {"total_candidates": total_candidates, "completed_candidates": completed_candidates}
+            state["proposals"] = proposals
+            state["changes"] = changes
+            _write_state(token, state)
+
+        review_state = build_review_state(records, lookup_fn=lambda a, b: None)
+        totals = dict(review_state["totals"])
+        totals["with_proposals"] = sum(1 for p in proposals if p)
+        totals["unchanged_or_nomatch"] = totals["total"] - totals["with_proposals"]
+        totals["no_match_records"] = sum(1 for r in records if r.get("lookup_status") in ("no_match", "failed"))
+
+        state["status"] = "done"
         state["proposals"] = proposals
         state["changes"] = changes
+        state["totals"] = totals
         _write_state(token, state)
-
-    review_state = build_review_state(records, lookup_fn=lambda a, b: None)
-    totals = dict(review_state["totals"])
-    totals["with_proposals"] = sum(1 for p in proposals if p)
-    totals["unchanged_or_nomatch"] = totals["total"] - totals["with_proposals"]
-    totals["no_match_records"] = sum(1 for r in records if r.get("lookup_status") in ("no_match", "failed"))
-
-    state["status"] = "done"
-    state["proposals"] = proposals
-    state["changes"] = changes
-    state["totals"] = totals
-    _write_state(token, state)
+    except Exception as e:
+        logger.exception(f"Review job failed for token {token}: {e}")
 @app.route("/", methods=["GET"])
 def home():
     return render_template("index.html")
