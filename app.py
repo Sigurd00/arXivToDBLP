@@ -25,6 +25,13 @@ os.makedirs(STATE_DIR, exist_ok=True)
 _STATE_IO_LOCK = threading.Lock()
 
 
+def _sync_local_dataset_on_startup() -> None:
+    """Ensure local DBLP dataset is available before serving requests."""
+    logger.info("Syncing local DBLP dataset on startup")
+    ensure_local_dblp_dataset_fresh()
+    logger.info("Local DBLP dataset sync complete")
+
+
 def _state_path(token: str) -> str:
     return os.path.join(STATE_DIR, f"{token}.json")
 
@@ -242,5 +249,6 @@ def finalize():
 
 
 if __name__ == "__main__":
+    _sync_local_dataset_on_startup()
     logger.info("Running BibTeX DBLP web UI")
     app.run(debug=True)
