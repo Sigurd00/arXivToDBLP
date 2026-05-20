@@ -118,10 +118,22 @@ def _download_dblp_xml(url: str, out_path: str, timeout: float = 120.0) -> None:
     tmp_path = f"{out_path}.tmp"
     with requests.get(url, stream=True, timeout=timeout) as resp:
         resp.raise_for_status()
+        total_bytes = int(resp.headers.get("Content-Length", "0") or "0")
+        downloaded = 0
+        next_log_percent = 5
         with open(tmp_path, "wb") as out:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     out.write(chunk)
+                    downloaded += len(chunk)
+                    if total_bytes > 0:
+                        pct = int((downloaded / total_bytes) * 100)
+                        while pct >= next_log_percent and next_log_percent <= 100:
+                            logger.info(f"DBLP dataset download progress: {next_log_percent}%")
+                            next_log_percent += 5
+                    else:
+                        if downloaded % (25 * 1024 * 1024) < len(chunk):
+                            logger.info(f"DBLP dataset download progress: {downloaded // (1024 * 1024)} MB")
     os.replace(tmp_path, out_path)
 
 
