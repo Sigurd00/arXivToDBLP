@@ -8,88 +8,150 @@
     body { font-family: Arial, sans-serif; margin: 2rem; }
     .summary { margin-bottom: 1rem; }
     .entry { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .entry.compact { padding: 0.45rem 0.65rem; margin-bottom: 0.5rem; font-size: 0.92rem; opacity: 0.9; }
     .entry h3 { margin-top: 0; }
+    .entry.compact h3 { margin: 0; font-size: 0.96rem; }
+    .entry.compact p { margin: 0.25rem 0 0 0; }
+    .status { font-size: 0.9rem; border-radius: 999px; padding: 0.2rem 0.5rem; margin-left: 0.5rem; }
+    .status.queued { background: #f0f0f0; }
+    .status.running { background: #e8f1ff; }
+    .status.found { background: #e8f9ee; }
+    .status.no_match, .status.failed { background: #fff2e5; }
     .diff-list { margin: 0.25rem 0 0.5rem 1rem; }
+    .git-diff { background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 0.6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.82rem; line-height: 1.35; white-space: pre-wrap; margin-top: 0.5rem; }
+    .git-diff .plus { color: #86efac; }
+    .git-diff .minus { color: #fca5a5; }
+    .git-diff .meta { color: #93c5fd; }
     .actions { margin-top: 1.5rem; }
-    .flash { padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; }
-    .flash.warning { background: #fff4df; color: #744b00; border: 1px solid #f2d29b; }
     code { background: #f6f6f6; padding: 0.1rem 0.25rem; border-radius: 3px; }
   </style>
 </head>
 <body>
   <h2>Review DBLP replacements</h2>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      {% for category, message in messages %}
-        <div class="flash {{ category }}">{{ message }}</div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
+  <div class="summary" id="summary"></div>
 
+  <div id="entries"></div>
 
-  <div class="summary">
-    <strong>Total entries:</strong> {{ totals.total }}<br>
-    <strong>Entries with proposals:</strong> {{ totals.with_proposals }}<br>
-    <strong>Unchanged / no match:</strong> {{ totals.unchanged_or_nomatch }}
-  </div>
-
-  <form method="post" action="{{ url_for('finalize') }}">
+  <form method="post" action="{{ url_for('finalize') }}" id="finalize-form" style="display:none;">
     <input type="hidden" name="token" value="{{ token }}" />
-
-    {% for record in records %}
-      {% set proposal = proposals[loop.index0] %}
-      {% set change = changes[loop.index0] %}
-
-      <div class="entry">
-        <h3>{{ record.citation_key }}</h3>
-        <p><strong>Original title:</strong> {{ record.fields.title or '(no title)' }}</p>
-
-        {% if proposal and change %}
-          <label>
-            <input type="checkbox" name="accept" value="{{ loop.index0 }}" checked>
-            Accept DBLP replacement
-          </label>
-
-          {% if change.type_changed %}
-            <p><strong>Type:</strong> <code>{{ change.type_changed.from }}</code> → <code>{{ change.type_changed.to }}</code></p>
-          {% endif %}
-
-          {% if change.added %}
-            <strong>Added fields</strong>
-            <ul class="diff-list">
-              {% for key, value in change.added.items() %}
-                <li><code>{{ key }}</code>: {{ value }}</li>
-              {% endfor %}
-            </ul>
-          {% endif %}
-
-          {% if change.modified %}
-            <strong>Modified fields</strong>
-            <ul class="diff-list">
-              {% for key, pair in change.modified.items() %}
-                <li><code>{{ key }}</code>: {{ pair.from }} → {{ pair.to }}</li>
-              {% endfor %}
-            </ul>
-          {% endif %}
-
-          {% if change.removed %}
-            <strong>Removed fields</strong>
-            <ul class="diff-list">
-              {% for key, value in change.removed.items() %}
-                <li><code>{{ key }}</code>: {{ value }}</li>
-              {% endfor %}
-            </ul>
-          {% endif %}
-        {% else %}
-          <p>No DBLP proposal for this entry.</p>
-        {% endif %}
-      </div>
-    {% endfor %}
-
+    <div id="accept-inputs"></div>
     <div class="actions">
       <button type="submit">Download converted.bib</button>
     </div>
   </form>
+
+  <script>
+    const token = "{{ token }}";
+    const summaryEl = document.getElementById("summary");
+    const entriesEl = document.getElementById("entries");
+    const finalizeForm = document.getElementById("finalize-form");
+    const acceptInputsEl = document.getElementById("accept-inputs");
+
+    function esc(v) {
+      return String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+
+    function render(state) {
+      const p = state.progress || { total_candidates: 0, completed_candidates: 0 };
+      const totals = state.totals || { total: (state.records || []).length, with_proposals: 0, unchanged_or_nomatch: (state.records || []).length };
+      const syncNote = state.dataset_sync_in_progress
+        ? `<br><strong>Dataset sync:</strong> Updating local DBLP dataset in background. Lookups may wait briefly.`
+        : "";
+      const statusDetail = state.status_detail
+        ? `<br><strong>Step:</strong> ${esc(state.status_detail)}`
+        : "";
+      summaryEl.innerHTML = `
+        <strong>Status:</strong> ${esc(state.status)}<br>
+        <strong>Progress:</strong> ${p.completed_candidates}/${p.total_candidates} arXiv lookups completed<br>
+        <strong>Total entries:</strong> ${totals.total}<br>
+        <strong>Entries with proposals:</strong> ${totals.with_proposals}<br>
+        <strong>Unchanged / no match:</strong> ${totals.unchanged_or_nomatch}${statusDetail}${syncNote}
+      `;
+
+      const records = state.records || [];
+      const proposals = state.proposals || [];
+      const changes = state.changes || [];
+
+      const acceptValues = [];
+      entriesEl.innerHTML = records.map((record, idx) => {
+        const proposal = proposals[idx];
+        const change = changes[idx];
+        const status = record.lookup_status || (record.from_arxiv && record.arxiv_id ? "queued" : "skipped");
+        const isCompact = status === "queued";
+
+        let body = `<p><strong>Original title:</strong> ${esc((record.fields || {}).title || "(no title)")}</p>`;
+        if (proposal && change) {
+          if (state.status === "done") {
+            acceptValues.push(idx);
+          }
+          const acceptDisabled = " disabled";
+          body += `<label><input type="checkbox" checked${acceptDisabled}> Accept DBLP replacement</label>`;
+          if (state.status !== "done") {
+            body += `<p><em>Selection is enabled after all lookups finish.</em></p>`;
+          }
+          if (change.type_changed) body += `<p><strong>Type:</strong> <code>${esc(change.type_changed.from)}</code> → <code>${esc(change.type_changed.to)}</code></p>`;
+          const modified = change.modified || {};
+          const added = change.added || {};
+          const removed = change.removed || {};
+          const diffLines = ['<span class="meta">@@ citation diff @@</span>'];
+          if (change.type_changed) {
+            diffLines.push(`<span class="minus">-type: ${esc(change.type_changed.from)}</span>`);
+            diffLines.push(`<span class="plus">+type: ${esc(change.type_changed.to)}</span>`);
+          }
+          Object.entries(modified).forEach(([k, v]) => {
+            diffLines.push(`<span class="minus">-${esc(k)}: ${esc(v.from)}</span>`);
+            diffLines.push(`<span class="plus">+${esc(k)}: ${esc(v.to)}</span>`);
+          });
+          Object.entries(added).forEach(([k, v]) => {
+            diffLines.push(`<span class="plus">+${esc(k)}: ${esc(v)}</span>`);
+          });
+          Object.entries(removed).forEach(([k, v]) => {
+            diffLines.push(`<span class="minus">-${esc(k)}: ${esc(v)}</span>`);
+          });
+          if (diffLines.length > 1) {
+            body += `<div class="git-diff">${diffLines.join("\n")}</div>`;
+          }
+          if (diffLines.length === 1 && !change.type_changed) {
+            body += `<p>No field-level differences were detected.</p>`;
+          }
+        } else if (status === "running" || status === "queued") {
+          body += status === "queued"
+            ? `<p>Queued… waiting its turn.</p>`
+            : `<p>Looking up DBLP data…</p>`;
+        } else if (status === "no_match") {
+          body += `<p>No DBLP proposal for this entry.</p>`;
+        } else if (status === "failed") {
+          body += `<p>Lookup failed for this entry; original will be kept.</p>`;
+        } else {
+          body += `<p>Not an arXiv entry; unchanged.</p>`;
+        }
+
+        return `<div class="entry${isCompact ? " compact" : ""}"><h3>${esc(record.citation_key)}<span class="status ${esc(status)}">${esc(status)}</span></h3>${body}</div>`;
+      }).join("");
+
+      acceptInputsEl.innerHTML = acceptValues
+        .map((idx) => `<input type="hidden" name="accept" value="${idx}">`)
+        .join("");
+
+      if (state.status === "done") {
+        finalizeForm.style.display = "block";
+      }
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch(`/review_status/${token}`);
+        if (!res.ok) return;
+        const state = await res.json();
+        render(state);
+        if (state.status !== "done") setTimeout(poll, 800);
+      } catch (_) {
+        setTimeout(poll, 1500);
+      }
+    }
+
+    poll();
+  </script>
 </body>
 </html>
