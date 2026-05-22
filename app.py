@@ -4,14 +4,16 @@ import os
 import json
 import tempfile
 import uuid
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from flask import (
-    Flask, request, render_template, send_file, redirect, url_for, flash
+    Flask, request, render_template, send_file, redirect, url_for, flash, jsonify
 )
 from parser import parse_bib_file, write_bib_file
 from review_logic import build_review_state, finalize_records
-from dblp_api import find_dblp_citation
+from dblp_api import find_dblp_citation, ensure_local_dblp_dataset_fresh, is_dataset_sync_in_progress
 from logger import logger
 
 app = Flask(__name__)
@@ -20,12 +22,138 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret")
 # Where we stash per-upload state between steps
 STATE_DIR = os.path.join(tempfile.gettempdir(), "bibdiff_state")
 os.makedirs(STATE_DIR, exist_ok=True)
+_STATE_IO_LOCK = threading.Lock()
+
+
+def _sync_local_dataset_on_startup() -> None:
+    """Ensure local DBLP dataset is available before serving requests."""
+    logger.info("Syncing local DBLP dataset on startup")
+    ensure_local_dblp_dataset_fresh()
+    logger.info("Local DBLP dataset sync complete")
+
+
+def _start_background_dataset_sync() -> None:
+    """Start dataset sync in background so web server can start immediately."""
+    t = threading.Thread(target=_sync_local_dataset_on_startup, daemon=True)
+    t.start()
+
+
+def _should_start_startup_sync(debug_mode: bool, run_main_env: Optional[str]) -> bool:
+    """Return True only for processes that should run startup dataset sync."""
+    return (not debug_mode) or (run_main_env == "true")
 
 
 def _state_path(token: str) -> str:
     return os.path.join(STATE_DIR, f"{token}.json")
 
 
+
+
+def _write_state(token: str, state: Dict[str, Any]) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = _state_path(token)
+    tmp_path = f"{path}.tmp"
+    with _STATE_IO_LOCK:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+        # On Windows, replacing a file can fail transiently if another
+        # reader has the destination file open. Retry briefly.
+        last_err: Optional[Exception] = None
+        for _ in range(6):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                time.sleep(0.05)
+
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        if last_err:
+            raise last_err
+
+
+def _read_state(token: str) -> Optional[Dict[str, Any]]:
+    state_path = _state_path(token)
+    if not os.path.exists(state_path):
+        return None
+    with _STATE_IO_LOCK:
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+def _process_review_job(token: str) -> None:
+    try:
+        state = _read_state(token)
+        if not state:
+            return
+
+        records: List[Dict[str, Any]] = state.get("records") or []
+        proposals: List[Optional[Dict[str, Any]]] = [None] * len(records)
+        changes: List[Optional[Dict[str, Any]]] = [None] * len(records)
+
+        total_candidates = 0
+        completed_candidates = 0
+        for rec in records:
+            if rec.get("from_arxiv") and rec.get("arxiv_id"):
+                total_candidates += 1
+
+        state["status"] = "running"
+        state["status_detail"] = "Running citation lookups..."
+        state["progress"] = {"total_candidates": total_candidates, "completed_candidates": 0}
+        _write_state(token, state)
+
+        from diff import compute_diff
+
+        for idx, rec in enumerate(records):
+            if not (rec.get("from_arxiv") and rec.get("arxiv_id")):
+                continue
+
+            arxiv_id = rec.get("arxiv_id")
+            citation_key = rec.get("citation_key")
+            rec["lookup_status"] = "running"
+            _write_state(token, state)
+            try:
+                proposal = find_dblp_citation(arxiv_id, citation_key)
+            except Exception:
+                proposal = None
+                rec["lookup_status"] = "failed"
+            else:
+                rec["lookup_status"] = "found" if proposal else "no_match"
+
+            proposals[idx] = proposal
+            changes[idx] = compute_diff(rec, proposal) if proposal else None
+
+            completed_candidates += 1
+            state["progress"] = {"total_candidates": total_candidates, "completed_candidates": completed_candidates}
+            state["proposals"] = proposals
+            state["changes"] = changes
+            _write_state(token, state)
+
+        review_state = build_review_state(records, lookup_fn=lambda a, b: None)
+        totals = dict(review_state["totals"])
+        totals["with_proposals"] = sum(1 for p in proposals if p)
+        totals["unchanged_or_nomatch"] = totals["total"] - totals["with_proposals"]
+        totals["no_match_records"] = sum(1 for r in records if r.get("lookup_status") in ("no_match", "failed"))
+
+        state["status"] = "done"
+        state["proposals"] = proposals
+        state["changes"] = changes
+        state["totals"] = totals
+        _write_state(token, state)
+    except Exception as e:
+        logger.exception(f"Review job failed for token {token}: {e}")
+        try:
+            failed_state = _read_state(token) or {}
+            failed_state["status"] = "failed"
+            failed_state["error"] = str(e)
+            _write_state(token, failed_state)
+        except Exception:
+            logger.exception(f"Could not persist failed state for token {token}")
 @app.route("/", methods=["GET"])
 def home():
     return render_template("index.html")
@@ -33,45 +161,60 @@ def home():
 
 @app.route("/review", methods=["POST"])
 def review():
-    """Accept uploaded .bib, compute DBLP proposals + diffs, render review page."""
+    """Accept uploaded .bib and start async DBLP lookup job."""
     uploaded_file = request.files.get("bibfile")
     if not uploaded_file or not uploaded_file.filename.endswith(".bib"):
         flash("Please upload a valid .bib file (.bib).", "error")
         return redirect(url_for("home"))
 
     try:
-        # Persist upload to a temp file so the parser can read it
         with tempfile.NamedTemporaryFile(delete=False, suffix=".bib") as tmp:
             uploaded_path = tmp.name
             uploaded_file.save(uploaded_path)
 
-        # Parse
         records = parse_bib_file(uploaded_path) or []
         logger.info(f"Parsed {len(records)} records from upload")
 
-        review_state = build_review_state(records, lookup_fn=find_dblp_citation)
-        for key in review_state["totals"].get("failure_keys", []):
-            flash(f"Lookup failed for {key}; original entry kept.", "warning")
-
         token = uuid.uuid4().hex
-        state = review_state
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(_state_path(token), "w", encoding="utf-8") as f:
-            json.dump(state, f)
+        state = {
+            "status": "queued",
+            "records": records,
+            "proposals": [None] * len(records),
+            "changes": [None] * len(records),
+            "progress": {"total_candidates": 0, "completed_candidates": 0},
+            "totals": {"total": len(records), "with_proposals": 0, "unchanged_or_nomatch": len(records)},
+        }
+        _write_state(token, state)
 
-        return render_template(
-            "review.html",
-            token=token,
-            records=review_state["records"],
-            proposals=review_state["proposals"],
-            changes=review_state["changes"],
-            totals=review_state["totals"],
-        )
+        thread = threading.Thread(target=_process_review_job, args=(token,), daemon=True)
+        thread.start()
+
+        return redirect(url_for("review_page", token=token))
 
     except Exception as e:
         logger.error(f"Processing failed: {e}")
         flash(f"Error while processing file: {e}", "error")
         return redirect(url_for("home"))
+
+
+@app.route("/review/<token>", methods=["GET"])
+def review_page(token: str):
+    state = _read_state(token)
+    if not state:
+        flash("Review session expired. Please re-upload.", "error")
+        return redirect(url_for("home"))
+
+    return render_template("review.html", token=token)
+
+
+@app.route("/review_status/<token>", methods=["GET"])
+def review_status(token: str):
+    state = _read_state(token)
+    if not state:
+        return jsonify({"error": "expired"}), 404
+    payload = dict(state)
+    payload["dataset_sync_in_progress"] = is_dataset_sync_in_progress()
+    return jsonify(payload)
 
 
 @app.route("/finalize", methods=["POST"])
@@ -106,7 +249,7 @@ def finalize():
         logger.info(f"Wrote output with {finalize_result['applied_replacements']} replacements (of {len(records)} total)")
         # Best-effort cleanup
         try:
-            os.remove(state_path)
+            os.remove(_state_path(token))
         except OSError:
             pass
 
@@ -119,5 +262,15 @@ def finalize():
 
 
 if __name__ == "__main__":
+    debug_mode = True
+    # In Flask debug mode, the reloader launches a parent + child process.
+    # Only start background sync in the serving child process to avoid
+    # duplicate dataset downloads/log streams.
+    should_start_sync = _should_start_startup_sync(
+        debug_mode=debug_mode,
+        run_main_env=os.environ.get("WERKZEUG_RUN_MAIN"),
+    )
+    if should_start_sync:
+        _start_background_dataset_sync()
     logger.info("Running BibTeX DBLP web UI")
-    app.run(debug=True)
+    app.run(debug=debug_mode)

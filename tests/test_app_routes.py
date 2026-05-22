@@ -29,16 +29,9 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn('/', resp.location)
 
-    @patch('app.find_dblp_citation')
-    @patch('app.render_template')
-    def test_review_rendering_with_proposals(self, mock_render, mock_find):
-        mock_render.return_value = 'ok'
-        mock_find.return_value = {
-            'type': 'article',
-            'citation_key': 'k1',
-            'fields': {'title': 'New', 'author': 'A'}
-        }
-
+    @patch('app._process_review_job')
+    @patch('app.is_dataset_sync_in_progress', return_value=True)
+    def test_review_starts_async_job_and_status_endpoint(self, mock_sync_flag, mock_process):
         bib = b"""
 @article{k1,
  title={Old},
@@ -46,13 +39,16 @@ class AppRouteTests(unittest.TestCase):
 }
 """
         resp = self._post_bib(bib)
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn('/review/', resp.location)
 
-        _, kwargs = mock_render.call_args
-        self.assertEqual(kwargs['totals']['with_proposals'], 1)
-        self.assertEqual(kwargs['totals']['total'], 1)
-        self.assertEqual(len(kwargs['proposals']), 1)
-        self.assertIsNotNone(kwargs['changes'][0])
+        token = resp.location.rsplit('/', 1)[-1]
+        status_resp = self.client.get(f'/review_status/{token}')
+        self.assertEqual(status_resp.status_code, 200)
+        payload = status_resp.get_json()
+        self.assertEqual(payload['status'], 'queued')
+        self.assertTrue(payload['dataset_sync_in_progress'])
+        mock_process.assert_called_once()
 
     def test_finalize_with_accepted_indices(self):
         token = 'tok'
@@ -75,6 +71,17 @@ class AppRouteTests(unittest.TestCase):
 
         expired = self.client.post('/finalize', data={'token': 'does-not-exist'})
         self.assertEqual(expired.status_code, 302)
+
+
+class StartupSyncDecisionTests(unittest.TestCase):
+    def test_should_start_sync_in_non_debug_process(self):
+        self.assertTrue(app_module._should_start_startup_sync(debug_mode=False, run_main_env=None))
+
+    def test_should_not_start_sync_in_debug_parent_process(self):
+        self.assertFalse(app_module._should_start_startup_sync(debug_mode=True, run_main_env=None))
+
+    def test_should_start_sync_in_debug_child_process(self):
+        self.assertTrue(app_module._should_start_startup_sync(debug_mode=True, run_main_env="true"))
 
 
 if __name__ == '__main__':
